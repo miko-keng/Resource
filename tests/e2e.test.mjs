@@ -571,3 +571,30 @@ test('unknown API routes return a JSON 404', async () => {
   assert.equal(status, 404);
   assert.match(data.error, /not found/i);
 });
+
+test('the delivery attempt log records what PayPal sent, including rejections', async () => {
+  const { status, data } = await api('/api/webhooks/attempts');
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(data.attempts));
+  assert.ok(data.max > 0, 'the log must be bounded');
+  assert.ok(data.attempts.length > 0, 'at least one delivery should have been recorded');
+
+  const outcomes = data.attempts.map((row) => row.outcome);
+  assert.ok(outcomes.includes('accepted'), `expected an accepted delivery, saw ${JSON.stringify(outcomes)}`);
+  // Both a rejected signature and a missing-headers delivery were exercised above.
+  assert.ok(
+    outcomes.includes('signature-rejected') || outcomes.includes('missing-headers'),
+    `a refused delivery must be visible, saw ${JSON.stringify(outcomes)}`,
+  );
+  // Only genuinely bad outcomes may claim to be unverified. A duplicate is a
+  // correctly signed event that happened to be a replay, so it stays verified.
+  const badOutcomes = ['signature-rejected', 'missing-headers', 'not-configured', 'bad-json'];
+  for (const row of data.attempts) {
+    if (badOutcomes.includes(row.outcome)) {
+      assert.equal(row.verified, false, `${row.outcome} must not claim verification`);
+    }
+    if (row.outcome === 'accepted' || row.outcome === 'duplicate') {
+      assert.equal(row.verified, true, `${row.outcome} should be recorded as signed`);
+    }
+  }
+});

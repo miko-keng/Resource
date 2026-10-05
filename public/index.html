@@ -88,6 +88,7 @@
               <section class="workspace-card"><div class="section-heading"><div><h2>Event stream</h2><p id="events-note">Waiting for events…</p></div><button class="quiet-button" id="simulate-lifecycle">Simulate full lifecycle <span>→</span></button></div><div id="events-list" class="workspace-list"></div></section>
               <section class="workspace-card"><div class="section-heading"><div><h2>Deadline watchdog</h2><p>Cases ordered by how soon PayPal needs an answer</p></div><button class="quiet-button" id="refresh-watchdog">↻ Recheck</button></div><div id="watchdog-list" class="workspace-list"></div></section>
             </div>
+            <div class="workspace-card"><div class="section-heading"><div><h2>Delivery attempts</h2><p id="attempts-note">Every delivery PayPal made, including ones we rejected</p></div><button class="quiet-button" id="refresh-attempts">↻ Recheck</button></div><div id="attempts-list" class="workspace-list"></div></div>
             <div class="workspace-card webhook-note"><strong>Verification is not optional.</strong> Without <code>PAYPAL_WEBHOOK_ID</code> configured, Recourse refuses unverified events rather than trusting them. Events fired from the simulator below are labelled <code>SIMULATED</code> and can never be mistaken for signed deliveries.</div>
           </section>
           <section class="workspace-page hidden" id="evidence-page">

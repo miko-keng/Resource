@@ -70,6 +70,7 @@ const LOCAL = process.env.RECOURSE_STATE_DIR ? path.resolve(process.env.RECOURSE
 const ACTIVITY_FILE = path.join(LOCAL, 'activity.json');
 const EVENTS_FILE = path.join(LOCAL, 'events.json');
 const PACKETS_FILE = path.join(LOCAL, 'packets.json');
+const ATTEMPTS_FILE = path.join(LOCAL, 'attempts.json');
 const detailCache = new Map();
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15_000);
 const MAX_LIST_PAGES = Number(process.env.MAX_LIST_PAGES || 5);
@@ -119,6 +120,49 @@ async function body(req) {
 /* ------------------------------------------------------------------ SSE */
 
 const sseClients = new Set();
+
+/**
+ * Recent webhook deliveries, *including the ones we rejected*. Without this a
+ * rejected delivery is indistinguishable from PayPal never calling at all,
+ * which is the hardest part of debugging any webhook integration.
+ * In-memory and bounded on purpose: this is written from the public internet.
+ */
+const webhookAttempts = [];
+const MAX_ATTEMPTS = 25;
+let attemptsLoaded = false;
+
+/**
+ * Hydrate the delivery log from disk once. Without this a plain process restart
+ * erases the only record of what PayPal sent us. Note that on a platform with an
+ * ephemeral filesystem this still does not survive a redeploy — see the README.
+ */
+async function ensureAttemptsLoaded() {
+  if (attemptsLoaded) return;
+  attemptsLoaded = true;
+  try {
+    const rows = await readStore(ATTEMPTS_FILE);
+    webhookAttempts.push(...rows.slice(0, MAX_ATTEMPTS));
+  } catch { /* start empty */ }
+}
+
+function noteWebhookAttempt(req, { eventId, eventType, outcome, verified, detail = null }) {
+  const entry = {
+    at: new Date().toISOString(),
+    eventId: eventId || null,
+    eventType: eventType || null,
+    outcome,
+    verified: Boolean(verified),
+    detail,
+    remote: req.socket?.remoteAddress || null,
+  };
+  webhookAttempts.unshift(entry);
+  if (webhookAttempts.length > MAX_ATTEMPTS) webhookAttempts.length = MAX_ATTEMPTS;
+  console.log(`[recourse] webhook ${outcome} · id=${entry.eventId || 'none'} · type=${entry.eventType || 'none'}${detail ? ` · ${detail}` : ''}`);
+  sseBroadcast('webhook-attempt', entry);
+  // Fire and forget: never make PayPal wait on our disk.
+  writeStore(ATTEMPTS_FILE, webhookAttempts).catch(() => {});
+  return entry;
+}
 
 function sseBroadcast(type, data) {
   const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -844,6 +888,11 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { events: rows, webhookConfigured: Boolean(process.env.PAYPAL_WEBHOOK_ID) });
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/webhooks/attempts') {
+      await ensureAttemptsLoaded();
+      return send(res, 200, { attempts: webhookAttempts, max: MAX_ATTEMPTS, webhookConfigured: Boolean(process.env.PAYPAL_WEBHOOK_ID) });
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/events/stream') {
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -887,19 +936,42 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/webhooks/paypal') {
       const raw = await rawBody(req);
       let event;
-      try { event = JSON.parse(raw); } catch { return send(res, 400, { error: 'Webhook body was not valid JSON.' }); }
+      try {
+        event = JSON.parse(raw);
+      } catch {
+        noteWebhookAttempt(req, { eventId: null, eventType: null, outcome: 'bad-json', verified: false });
+        return send(res, 400, { error: 'Webhook body was not valid JSON.' });
+      }
 
       if (MODE !== 'sandbox') {
         const recorded = await recordEvent(event, { simulated: true, verified: false });
+        noteWebhookAttempt(req, { eventId: event.id, eventType: event.event_type, outcome: recorded.duplicate ? 'duplicate' : 'accepted-fixture', verified: false });
         if (!recorded.duplicate) setImmediate(() => processEvent(event, recorded.row).catch(() => {}));
         return send(res, 200, { received: true, verified: false, duplicate: recorded.duplicate, note: 'Fixture mode: stored without PayPal signature verification.' });
       }
 
-      const verified = await verifyWebhookSignature(req.headers, event);
-      if (!verified) return send(res, 400, { error: 'PayPal webhook signature verification failed. The event was not processed.' });
+      let verified = false;
+      try {
+        verified = await verifyWebhookSignature(req.headers, event);
+      } catch (error) {
+        // Distinguish "we could not check" from "PayPal says this is forged".
+        noteWebhookAttempt(req, {
+          eventId: event.id,
+          eventType: event.event_type,
+          outcome: error.status === 503 ? 'not-configured' : 'missing-headers',
+          verified: false,
+          detail: error.message,
+        });
+        throw error;
+      }
+      if (!verified) {
+        noteWebhookAttempt(req, { eventId: event.id, eventType: event.event_type, outcome: 'signature-rejected', verified: false });
+        return send(res, 400, { error: 'PayPal webhook signature verification failed. The event was not processed.' });
+      }
 
       const recorded = await recordEvent(event, { simulated: false, verified: true });
       // Acknowledge immediately; PayPal retries if it doesn't see 200 within 30s.
+      noteWebhookAttempt(req, { eventId: event.id, eventType: event.event_type, outcome: recorded.duplicate ? 'duplicate' : 'accepted', verified: true });
       if (!recorded.duplicate) setImmediate(() => processEvent(event, recorded.row).catch(() => {}));
       return send(res, 200, { received: true, verified: true, duplicate: recorded.duplicate, eventId: recorded.row?.id });
     }
@@ -981,6 +1053,8 @@ const server = http.createServer(async (req, res) => {
     res.end('Something went wrong.');
   }
 });
+
+await ensureAttemptsLoaded();
 
 server.listen(PORT, HOST, () => {
   console.log(`Recourse is running at http://${HOST}:${PORT} · mode=${MODE}${DEMO_READONLY ? ' · READ-ONLY demo' : ''}`);

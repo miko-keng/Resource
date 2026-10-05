@@ -325,7 +325,7 @@ $('#nav-overview').addEventListener('click', event => { event.preventDefault(); 
 $('#nav-disputes').addEventListener('click', event => { event.preventDefault(); setPage('disputes'); });
 $('#nav-orders').addEventListener('click', event => { event.preventDefault(); setPage('orders'); renderOrders(); });
 $('#nav-evidence').addEventListener('click', event => { event.preventDefault(); setPage('evidence'); renderEvidenceLibrary(); });
-$('#nav-webhooks').addEventListener('click', event => { event.preventDefault(); setPage('webhooks'); loadEvents(); loadWatchdog(); });
+$('#nav-webhooks').addEventListener('click', event => { event.preventDefault(); setPage('webhooks'); loadEvents(); loadWatchdog(); loadAttempts(); });
 $('#overview-open-case').addEventListener('click', () => { if (!state.activeId) return showToast('Select a live case first.', true); setPage('disputes'); loadCase(state.activeId); });
 $('#see-order').addEventListener('click', () => setPage('orders'));
 $('#full-history').addEventListener('click', () => { state.showAllActivity = !state.showAllActivity; $('#full-history').innerHTML = state.showAllActivity ? 'Show recent <span>→</span>' : 'Full history <span>→</span>'; renderActivity(state.caseData?.activity || [], state.caseData?.source); });
@@ -408,6 +408,28 @@ async function loadWatchdog() {
   } catch (error) { showToast(error.message, true); }
 }
 
+function renderAttempts(rows = []) {
+  const list = $('#attempts-list');
+  if (!list) return;
+  if ($('#attempts-note')) {
+    $('#attempts-note').textContent = rows.length
+      ? `${rows.length} delivery attempt${rows.length === 1 ? '' : 's'} seen, including rejected ones`
+      : 'No delivery attempts seen yet. If PayPal reports a send, one should appear here.';
+  }
+  const tone = { accepted: 'ok', duplicate: 'ok', 'accepted-fixture': 'warn', duplicate_warn: 'warn' };
+  list.innerHTML = rows.length ? rows.map(row => {
+    const bad = ['signature-rejected', 'not-configured', 'missing-headers', 'bad-json'].includes(row.outcome);
+    return `<div class="workspace-row event-row"><span class="urgency-dot ${bad ? 'overdue' : 'ok'}"></span><div><strong>${escapeHtml(row.outcome)}</strong><small>${escapeHtml(row.eventType || 'unknown event')}${row.eventId ? ` · ${escapeHtml(row.eventId)}` : ''} · ${relative(row.at)}</small>${row.detail ? `<p class="event-error">${escapeHtml(row.detail)}</p>` : ''}</div></div>`;
+  }).join('') : '<p class="empty-evidence">Nothing has been delivered to the webhook endpoint yet.</p>';
+}
+
+async function loadAttempts() {
+  try {
+    const result = await api('/api/webhooks/attempts');
+    renderAttempts(result.attempts || []);
+  } catch (error) { showToast(error.message, true); }
+}
+
 function setStreamState(text, ok) {
   const node = $('#stream-state');
   if (!node) return;
@@ -433,6 +455,7 @@ function connectEventStream() {
     loadWatchdog().catch(() => {});
   });
   source.addEventListener('case-updated', () => { loadCases().catch(() => {}); });
+  source.addEventListener('webhook-attempt', () => { loadAttempts().catch(() => {}); });
   return source;
 }
 
@@ -452,5 +475,7 @@ if ($('#simulate-lifecycle')) {
   });
 }
 if ($('#refresh-watchdog')) $('#refresh-watchdog').addEventListener('click', () => loadWatchdog());
+if ($('#refresh-attempts')) $('#refresh-attempts').addEventListener('click', () => loadAttempts());
 if ($('#event-count')) loadEvents();
+if ($('#attempts-list')) loadAttempts();
 connectEventStream();
