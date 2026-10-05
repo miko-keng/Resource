@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5f5f1" />
+    <meta name="description" content="A calmer way to review PayPal disputes." />
+    <title>Recourse — Dispute desk</title>
+    <link rel="icon" href="/recourse.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" aria-label="Recourse home"><span class="brand-mark">r.</span><span>recourse</span></a>
+        <div class="workspace"><div class="workspace-avatar">S</div><div><strong>Studio Supply Co.</strong><small>Merchant workspace</small></div><span class="chevron">⌄</span></div>
+        <div class="side-label">WORKSPACE</div>
+        <nav class="nav">
+          <a href="#" class="nav-item" id="nav-overview"><span class="nav-icon">▦</span>Overview</a>
+          <a href="#" class="nav-item active" id="nav-disputes"><span class="nav-icon">◷</span>Disputes<span class="nav-count">0</span></a>
+          <a href="#" class="nav-item" id="nav-orders"><span class="nav-icon">▤</span>Orders</a>
+          <a href="#" class="nav-item" id="nav-evidence"><span class="nav-icon">⌁</span>Evidence library</a>
+          <a href="#" class="nav-item" id="nav-webhooks"><span class="nav-icon">⇄</span>Webhooks<span class="nav-badge" id="event-count">0</span></a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="help-card"><div class="help-icon">✳</div><strong>Need a hand?</strong><p>Our guide helps you get the most from every case.</p><a href="#setup">Open quick guide <span>↗</span></a></div>
+          <div class="profile"><div class="profile-avatar">M</div><div><strong>Merchant admin</strong><small>Owner</small></div><span class="more">···</span></div>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>Dispute desk</strong></div><div class="top-actions"><span class="today" id="today"></span><button class="icon-button" aria-label="Notifications">♧<i></i></button><div class="mini-avatar">KL</div></div></header>
+        <div class="content">
+          <div class="page-heading"><div><div class="eyebrow"><span id="today-full"></span> <span class="live-dot"></span></div><h1>Dispute desk<span class="period">.</span></h1><p>Every case, one clear next step.</p></div><button class="quiet-button" id="refresh"><span>↻</span> Refresh cases</button></div>
+
+          <section class="workspace-page" id="disputes-page" aria-label="Disputes workspace">
+          <section class="metric-grid" aria-label="Dispute summary">
+            <article class="metric-card" id="metric-open-card"><div class="metric-top"><span>Open cases</span><span class="metric-glyph">◷</span></div><div class="metric-value" id="metric-open">—</div><div class="metric-foot"><span class="metric-note">Across all stages</span><span class="mini-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div></article>
+            <article class="metric-card" id="metric-review-card"><div class="metric-top"><span>Needs your review</span><span class="metric-glyph lilac">✳</span></div><div class="metric-value" id="metric-review">—</div><div class="metric-foot"><span class="metric-note">Awaiting seller response</span><span class="metric-trend">Review →</span></div></article>
+            <article class="metric-card" id="metric-risk-card"><div class="metric-top"><span>Earliest response due</span><span class="metric-glyph coral">⌛</span></div><div class="metric-value" id="metric-risk">—</div><div class="metric-foot"><span class="metric-note" id="metric-risk-note">Next case deadline</span><span class="due-pill" id="metric-due">—</span></div></article>
+            <article class="metric-card mint-card" id="metric-sources-card"><div class="metric-top"><span>Order sources linked</span><span class="metric-glyph mint">↗</span></div><div class="metric-value" id="metric-sources">—</div><div class="metric-foot"><span class="metric-note">For the selected case</span><span class="metric-trend mint-text">Evidence →</span></div></article>
+          </section>
+
+          <section class="case-layout">
+            <div class="case-list-panel">
+              <div class="section-heading"><div><h2>Active cases <span class="count-chip" id="active-count">—</span></h2><p>Sorted by response deadline</p></div><select class="filter-button" id="case-filter" aria-label="Filter cases"><option value="all">All cases</option><option value="review">Needs review</option><option value="due">Has response deadline</option></select></div>
+              <div class="case-list" id="case-list"><div class="empty-cases">Loading cases…</div></div>
+              <button class="view-all" id="view-all-cases">View all cases <span>→</span></button>
+              <div class="deadline-card"><div class="deadline-icon">◷</div><div><strong>Keep an eye on your deadlines</strong><p>Cases close automatically after their response window.</p></div><span class="deadline-arrow">↗</span></div>
+            </div>
+
+            <div class="detail-panel" id="detail-panel">
+              <div class="detail-top"><div><div class="case-kicker"><span class="case-symbol small shipping">↗</span><span>CASE <b id="case-id">Loading…</b></span><span class="status-pill"><i></i><span id="case-status">Loading</span></span></div><h2 id="detail-reason">Loading case</h2><p class="detail-sub" id="detail-sub">Fetching the current case from the selected source…</p></div><button class="dots-button" aria-label="More options">···</button></div>
+              <div class="case-facts"><div><span>DISPUTED AMOUNT</span><strong id="amount">—</strong></div><div><span>RESPONSE DUE</span><strong class="deadline-text">—</strong></div><div><span>CASE STAGE</span><strong class="stage-pill">—</strong></div></div>
+              <div class="source-strip"><span class="source-badge paypal-badge" id="paypal-source">PayPal Sandbox case</span><span class="source-match" id="link-source">Checking local order match…</span></div>
+              <div class="detail-body">
+                <div class="analysis-heading"><div><span class="sparkle">✳</span><h3>Case overview</h3><span class="analysis-label" id="analysis-label">DEMO ANALYSIS</span></div><span class="confidence" id="confidence">—</span></div>
+                <div class="ai-row"><span class="ai-chip ai-off" id="ai-status">Checking model…</span><span class="ai-note">PayPal actions stay deterministic — the model never calls PayPal.</span></div>
+                <div class="summary-box"><span class="summary-quote">“</span><p id="summary">The buyer says the backpack did not arrive. The local order record contains a delivery scan and two email exchanges.</p></div>
+                <div class="evidence-heading"><h3>Evidence linked <span class="count-chip green-count" id="evidence-count">0</span></h3><button class="text-button" id="see-order">See order <span>↗</span></button></div>
+                <div class="evidence-list" id="evidence-list"></div>
+                <div class="missing-note" id="missing-note"><span>!</span><div><strong>One detail to keep in mind</strong><p id="missing-text">No delivery address or recipient signature is included in the local demo records.</p></div></div>
+                <div class="missing-note contradiction-note hidden" id="contradiction-note"><span>⚠</span><div><strong>Conflicting records found</strong><p id="contradiction-text"></p></div></div>
+                <p class="grounding-note hidden" id="grounding-note"></p>
+                <div class="draft-heading"><div><span class="draft-icon">✎</span><h3>Response draft</h3><span class="editable-tag">EDITABLE</span></div><button class="text-button" id="regenerate">↻ Re-draft</button></div>
+                <div class="draft-box"><textarea id="draft" rows="5" aria-label="Edit your response draft"></textarea><div class="draft-footer"><span><i class="source-dot"></i><span id="draft-provenance">Based on linked local sources</span></span><span id="char-count">0 / 2,000</span></div></div>
+                <div class="approval-note"><span>◈</span><p><strong>You’re in control.</strong> Review the evidence and edit this response before anything is sent.</p></div>
+                <div class="submit-row"><button class="submit-button" id="submit-response">Review &amp; submit response <span>→</span></button><span class="submit-caption">Nothing is sent without your approval</span></div>
+              </div>
+            </div>
+          </section>
+          <section class="activity-panel"><div class="section-heading"><div><h2>Recent activity</h2><p>A clear record of every step</p></div><button class="text-button" id="full-history">Full history <span>→</span></button></div><div class="activity-list" id="activity-list"></div></section>
+          </section>
+          <section class="workspace-page hidden" id="overview-page">
+            <div class="workspace-intro"><div><div class="eyebrow">CASE COMMAND CENTER</div><h2>Know what to send, and why.</h2><p>Recourse turns each live PayPal dispute into a reviewable evidence packet. Select a case, inspect the supporting records, then open its workspace.</p></div><button class="submit-button" id="overview-open-case">Open selected case <span>→</span></button></div>
+            <div class="overview-grid"><section class="workspace-card"><div class="section-heading"><div><h2>Live PayPal disputes</h2><p id="overview-case-note">Loading…</p></div></div><div id="overview-case-list" class="workspace-list"></div></section><section class="workspace-card"><div class="section-heading"><div><h2>Evidence readiness</h2><p>For the selected dispute</p></div></div><div id="overview-readiness" class="readiness"></div></section></div>
+          </section>
+          <section class="workspace-page hidden" id="orders-page">
+            <div class="workspace-intro"><div><div class="eyebrow">ORDER RECORDS</div><h2>Orders are separate from cases.</h2><p>These are your local order records. A case appears here only when its PayPal transaction or invoice matches an order.</p></div></div>
+            <section class="workspace-card"><div class="section-heading"><div><h2>All orders</h2><p id="orders-count">Loading…</p></div></div><div id="orders-list" class="workspace-list"></div></section>
+          </section>
+          <section class="workspace-page hidden" id="webhooks-page">
+            <div class="workspace-intro"><div><div class="eyebrow">PAYPAL WEBHOOKS</div><h2>Disputes arrive on their own.</h2><p>Recourse receives PayPal dispute events, verifies each signature, records every event exactly once, and triages the case before you open it. The dashboard below updates live.</p></div><span class="live-pill" id="stream-state">connecting…</span></div>
+            <div class="overview-grid">
+              <section class="workspace-card"><div class="section-heading"><div><h2>Event stream</h2><p id="events-note">Waiting for events…</p></div><button class="quiet-button" id="simulate-lifecycle">Simulate full lifecycle <span>→</span></button></div><div id="events-list" class="workspace-list"></div></section>
+              <section class="workspace-card"><div class="section-heading"><div><h2>Deadline watchdog</h2><p>Cases ordered by how soon PayPal needs an answer</p></div><button class="quiet-button" id="refresh-watchdog">↻ Recheck</button></div><div id="watchdog-list" class="workspace-list"></div></section>
+            </div>
+            <div class="workspace-card webhook-note"><strong>Verification is not optional.</strong> Without <code>PAYPAL_WEBHOOK_ID</code> configured, Recourse refuses unverified events rather than trusting them. Events fired from the simulator below are labelled <code>SIMULATED</code> and can never be mistaken for signed deliveries.</div>
+          </section>
+          <section class="workspace-page hidden" id="evidence-page">
+            <div class="workspace-intro"><div><div class="eyebrow">EVIDENCE LIBRARY</div><h2>Reusable records, clearly sourced.</h2><p>Evidence stays in the library until you select a case and choose what to include in its response.</p></div></div>
+            <section class="workspace-card"><div class="section-heading"><div><h2>All evidence records</h2><p id="evidence-library-count">Loading…</p></div></div><div id="evidence-library-list" class="workspace-list"></div></section>
+          </section>
+          <footer class="footer"><span>© 2026 Recourse</span><span>Thoughtful tools for the moments that matter.</span><a href="#setup" id="setup-link">Setup &amp; demo notes <span>↗</span></a></footer>
+        </div>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <dialog id="approval-dialog"><form method="dialog"><div class="dialog-symbol">↗</div><button class="dialog-close" aria-label="Close">×</button><div class="eyebrow">FINAL REVIEW</div><h2>Ready to send?</h2><p>Review the response and selected evidence below. The app records your approval, then follows the mode shown here.</p><div class="approval-preview" id="approval-preview"></div><div class="dialog-mode" id="dialog-mode"></div><div class="dialog-actions"><button class="cancel-button" value="cancel">Keep editing</button><button class="confirm-button" id="confirm-submit" value="default">Confirm &amp; submit <span>→</span></button></div></form></dialog>
+    <dialog id="setup-dialog"><form method="dialog"><button class="dialog-close" aria-label="Close">×</button><div class="eyebrow">GETTING STARTED</div><h2>Set up your demo</h2><p>This project runs in fixture mode until you add PayPal Sandbox credentials and buyer-side setup.</p><ol><li>Sign up at developer.paypal.com and create a Sandbox REST app.</li><li>Create Sandbox personal (buyer) and business accounts; send a test payment from buyer to business.</li><li>API-based buyer dispute creation needs the <code>DISPUTE_CREATE</code> scope enabled by PayPal, buyer consent, and an auth assertion. This can take time; follow PayPal's current Sandbox test guide.</li><li>Copy <code>.env.example</code> to <code>.env</code>, enter credentials, then set <code>PAYPAL_MODE=sandbox</code>.</li><li>For AI-assisted drafting, set <code>AI_PROVIDER=gemini</code> and <code>GEMINI_API_KEY</code>, plus <code>AI_MODEL</code> and <code>AI_MODEL_FALLBACKS</code> to survive a model outage. Without a key, Recourse labels a rules-based draft instead.</li></ol><a class="docs-link" href="https://developer.paypal.com/disputes/test-go-live/" target="_blank" rel="noreferrer">PayPal sandbox test guide ↗</a><div class="setup-actions"><button type="button" class="check-access hidden" id="check-access">Check Sandbox API access</button><button type="button" class="check-access hidden" id="check-ai">Check AI model</button></div><div class="access-result" id="access-result"></div><div class="access-result" id="ai-result"></div><div class="dialog-actions"><button class="confirm-button" value="close">Got it</button></div></form></dialog>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

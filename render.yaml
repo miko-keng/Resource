@@ -1,0 +1,37 @@
+# Render blueprint for the Recourse hosted demo.
+#
+# Assumes the repository root IS the Recourse app directory. If you pushed a
+# parent folder instead, add `rootDir: recourse` under the service.
+#
+# The demo is deliberately read-only: PayPal data, webhook triage and the live
+# event feed all stay real, but filing evidence is refused (DEMO_READONLY), so a
+# visitor cannot consume the one demoable dispute. That flag is the difference
+# between a demo and a self-destruct button.
+services:
+  - type: web
+    name: recourse
+    runtime: node
+    plan: free
+    buildCommand: ""            # zero runtime dependencies — nothing to build
+    startCommand: node server.mjs
+    healthCheckPath: /api/config
+    envVars:
+      # Required: a PaaS router forwards to the container's public interface.
+      # Without this the service binds loopback and every request 502s.
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_VERSION
+        value: "22"
+      - key: PAYPAL_MODE
+        value: sandbox
+      - key: AI_ENABLED
+        value: "false"
+      - key: DEMO_READONLY
+        value: "true"
+
+    # Set these three as secrets in the Render dashboard (Environment tab),
+    # never in this file and never in the repository:
+    #
+    #   PAYPAL_CLIENT_ID       sandbox REST app client id
+    #   PAYPAL_CLIENT_SECRET   sandbox REST app secret
+    #   PAYPAL_WEBHOOK_ID      id of the webhook you register for this URL

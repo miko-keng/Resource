@@ -1,0 +1,51 @@
+[
+  {
+    "invoice_number": "RC-10482",
+    "paypal_transaction_id": "4B653331N90046216",
+    "order_id": "ORD-10482",
+    "customer": "John Doe",
+    "item": "Everyday Carry Backpack",
+    "amount": "10.00",
+    "currency": "MYR",
+    "ordered_at": "2026-09-18T10:14:00Z",
+    "fulfillment": {
+      "carrier": "USPS",
+      "tracking_number": "9400111899223856921048",
+      "shipped_at": "2026-09-19T16:20:00Z",
+      "delivered_at": "2026-09-23T13:06:00Z",
+      "delivery_status": "Delivered"
+    },
+    "communications": [
+      { "at": "2026-09-24T09:15:00Z", "channel": "Email", "summary": "Merchant sent a delivery confirmation and tracking link." },
+      { "at": "2026-09-25T14:32:00Z", "channel": "Email", "summary": "Buyer said they would check with household members; no further reply is recorded." }
+    ]
+  },
+  {
+    "invoice_number": "RC-10391",
+    "order_id": "ORD-10391",
+    "customer": "Amara Chen",
+    "item": "Canvas Weekender Bag",
+    "amount": "129.00",
+    "currency": "USD",
+    "ordered_at": "2026-09-12T12:04:00Z",
+    "fulfillment": { "carrier": "UPS", "tracking_number": "1Z84A92E0391428105", "shipped_at": "2026-09-13T15:40:00Z", "delivered_at": "2026-09-17T10:22:00Z", "delivery_status": "Delivered" },
+    "communications": [
+      { "at": "2026-09-19T13:10:00Z", "channel": "Email", "summary": "Buyer reported a loose interior seam and attached two photos." },
+      { "at": "2026-09-20T09:35:00Z", "channel": "Email", "summary": "Merchant offered a prepaid return label; no return scan is recorded." }
+    ]
+  },
+  {
+    "invoice_number": "RC-10344",
+    "order_id": "ORD-10344",
+    "customer": "Sam Rivera",
+    "item": "Desk Organizer Set",
+    "amount": "46.50",
+    "currency": "USD",
+    "ordered_at": "2026-09-07T09:28:00Z",
+    "fulfillment": { "carrier": "USPS", "tracking_number": "9400111899223856921034", "shipped_at": "2026-09-08T14:16:00Z", "delivered_at": "2026-09-11T11:48:00Z", "delivery_status": "Delivered" },
+    "communications": [
+      { "at": "2026-09-14T08:30:00Z", "channel": "Email", "summary": "Buyer requested a cancellation after delivery." },
+      { "at": "2026-09-15T16:05:00Z", "channel": "Email", "summary": "Merchant approved a return; no refund transaction ID is recorded." }
+    ]
+  }
+]
