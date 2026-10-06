@@ -671,3 +671,47 @@ test('a restart resumes an event that was recorded but never processed', async (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/* ------------------------------------------------------------- agent */
+
+test('triage runs a bounded agent investigation and records what it did', async () => {
+  const { status, data } = await api('/api/triage/PP-T-1', { method: 'POST' });
+  assert.equal(status, 200);
+
+  const investigation = data.packet.investigation;
+  assert.ok(investigation, 'the packet must carry the investigation');
+  assert.equal(investigation.planner, 'deterministic', 'AI is disabled, so the no-model planner must run');
+  assert.equal(investigation.stoppedReason, 'investigation_complete');
+  assert.ok(investigation.steps > 0 && investigation.steps <= 8, `bounded steps expected, got ${investigation.steps}`);
+  assert.ok(Array.isArray(investigation.transcript) && investigation.transcript.length > 0);
+
+  // The agent must have consulted the real sources, and said why.
+  const tools = investigation.transcript.map((entry) => entry.tool);
+  assert.ok(tools.includes('get_dispute'));
+  assert.ok(tools.includes('resolve_transaction'));
+  assert.ok(tools.includes('cross_check'));
+  assert.ok(investigation.transcript.every((entry) => typeof entry.why === 'string' && entry.why.length > 0), 'every step must state its reason');
+});
+
+test('the agent cannot reach the irreversible filing tool', async () => {
+  const { data } = await api('/api/triage/PP-T-1', { method: 'POST' });
+  const investigation = data.packet.investigation;
+
+  // Hidden from the catalog the planner sees...
+  assert.ok(investigation.irreversible_tools_hidden.includes('file_evidence'));
+  // ...and absent from every step it actually took.
+  const tools = investigation.transcript.map((entry) => entry.tool);
+  assert.equal(tools.includes('file_evidence'), false, 'the agent must never file evidence');
+  assert.equal(investigation.transcript.some((entry) => entry.blocked), false, 'and must never even attempt to');
+});
+
+test('the agent still produces a complete packet when the planner stops immediately', async () => {
+  // Deterministic completion must not depend on the planner being thorough.
+  const { status, data } = await api('/api/triage/PP-T-1', { method: 'POST' });
+  assert.equal(status, 200);
+  const packet = data.packet;
+  assert.ok(packet.draft.length > 0, 'a packet must always carry a draft');
+  assert.ok(packet.plan && packet.plan.allowed.length > 0, 'and an evidence plan');
+  assert.ok(packet.findings && Array.isArray(packet.findings.risks));
+  assert.equal(packet.grounding.status !== 'review', true, 'and a grounded draft');
+});

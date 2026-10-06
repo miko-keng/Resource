@@ -42,3 +42,7 @@
 .origin-manual{border-color:#d8cdf0;background:#f4effc;color:var(--purple)}
 .support-note{border-color:#bfe0cd;background:var(--lime)}
 .support-note span{color:var(--green)}
+
+/* --- agent investigation transcript (added) --- */
+.agent-card{margin-top:14px}
+.agent-card .event-row small{color:var(--muted)}

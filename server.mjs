@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { aiConfig, aiConfigured, aiHealthCheck, generateJSON } from './lib/ai.mjs';
+import { DEFAULT_MAX_STEPS, investigate, llmPlanner, procedurePlanner } from './lib/agent.mjs';
+import { RISK, buildCatalog, defineTool, irreversibleToolNames } from './lib/agent-tools.mjs';
 import {
   applyFulfillment,
   resolveFulfillment,
@@ -443,13 +445,228 @@ async function assembleCase(dispute, order) {
  * transaction, assemble the evidence set and store the packet. This is what
  * makes a dispute arrive already triaged instead of waiting for a click.
  */
-async function triageCase(disputeId, { trigger = 'manual' } = {}) {
-  const dispute = MODE === 'sandbox'
-    ? await fetchDisputeFresh(disputeId)
-    : (await jsonFile('data/demo-cases.json')).find((item) => item.id === disputeId);
-  if (!dispute) throw Object.assign(new Error('That case was not found.'), { status: 404 });
+/**
+ * The capabilities the investigation agent may use, closing over one case.
+ * Every tool mutates the shared context so later steps and the planner can see
+ * what has already been established.
+ *
+ * `file_evidence` is registered at RISK.IRREVERSIBLE. It is deliberately part of
+ * the catalog so the guard is real and demonstrable — but describeCatalog()
+ * hides it from the planner, and the loop refuses it if named anyway.
+ */
+function caseToolCatalog(context) {
+  const { disputeId } = context;
 
-  const order = await matchingOrder(dispute);
+  const loadDispute = async () => {
+    if (context.dispute) return context.dispute;
+    const dispute = MODE === 'sandbox'
+      ? await fetchDisputeFresh(disputeId)
+      : (await jsonFile('data/demo-cases.json')).find((item) => item.id === disputeId);
+    if (!dispute) throw Object.assign(new Error('That case was not found.'), { status: 404 });
+    dispute.id = dispute.id || dispute.dispute_id || disputeId;
+    context.dispute = dispute;
+    return dispute;
+  };
+
+  return buildCatalog([
+    defineTool({
+      name: 'get_dispute',
+      description: 'Load the PayPal dispute: reason, stage, amount, deadline and requested evidence.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        return {
+          dispute_id: dispute.id,
+          reason: dispute.reason,
+          reason_label: reasonLabel(dispute.reason),
+          stage: dispute.dispute_life_cycle_stage || null,
+          status: dispute.status || null,
+          amount: dispute.dispute_amount || null,
+          response_due: dispute.seller_response_due_date || null,
+          requested_evidence: (dispute.evidences || []).filter((e) => e.source === 'REQUESTED_FROM_SELLER').map((e) => e.evidence_type),
+        };
+      },
+    }),
+    defineTool({
+      name: 'resolve_transaction',
+      description: 'Resolve the PayPal payment behind this dispute (reporting, then captures, then orders). Returns null if PayPal exposes none.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        // An explicit flag, not a null check: "not looked yet" and "looked and
+        // found nothing" are different states, and conflating them makes the
+        // planner retry the same tool until the budget runs out.
+        if (!context.transactionResolved) {
+          context.transaction = await fetchPayPalTransaction(disputeTransactionId(dispute));
+          context.transactionResolved = true;
+        }
+        if (!context.transaction) return null;
+        return {
+          transaction_id: context.transaction.transaction_id,
+          status: context.transaction.status,
+          amount: context.transaction.amount,
+          created_at: context.transaction.created_at,
+          seller_protection: context.transaction.seller_protection || null,
+        };
+      },
+    }),
+    defineTool({
+      name: 'find_merchant_order',
+      description: 'Find the merchant\'s own order record for this dispute, matched by transaction id then invoice number. Returns null when nothing matches.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        if (!context.matchedOrder) context.matchedOrder = await matchingOrder(dispute);
+        if (!context.matchedOrder) return null;
+        return { order_id: context.matchedOrder.order_id, item: context.matchedOrder.item, has_fulfillment: Boolean(context.matchedOrder.fulfillment) };
+      },
+    }),
+    defineTool({
+      name: 'read_paypal_tracker',
+      description: 'Tracking registered with PayPal against the disputed transaction. Returns null when the merchant never registered any.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        return fetchPayPalTracker(disputeTransactionId(dispute));
+      },
+    }),
+    defineTool({
+      name: 'get_fulfillment',
+      description: 'Resolve carrier, tracking and delivery across every source, with the provider that supplied each fact and any gaps.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        if (!context.matchedOrder) context.matchedOrder = await matchingOrder(dispute);
+        if (!context.fulfillment) context.fulfillment = await resolveCaseFulfillment(dispute, context.matchedOrder, context.transaction);
+        return {
+          fulfillment: context.fulfillment.fulfillment,
+          provenance: context.fulfillment.provenance,
+          primary_source: context.fulfillment.primary_source,
+          conflicts: context.fulfillment.conflicts,
+          gaps: context.fulfillment.gaps,
+        };
+      },
+    }),
+    defineTool({
+      name: 'cross_check',
+      description: 'Compare the dispute, payment, order and fulfilment records against each other. Returns risks, supports and gaps.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        if (!context.matchedOrder) context.matchedOrder = await matchingOrder(dispute);
+        if (!context.fulfillment) context.fulfillment = await resolveCaseFulfillment(dispute, context.matchedOrder, context.transaction);
+        const order = applyFulfillment(context.matchedOrder, context.fulfillment);
+        if (!context.findings) context.findings = crossCheck({ dispute, order, fulfillment: context.fulfillment, capture: context.transaction });
+        return {
+          risks: context.findings.risks.map((r) => r.code),
+          supports: context.findings.supports.map((r) => r.code),
+          gaps: context.findings.gaps.map((g) => g.code),
+        };
+      },
+    }),
+    defineTool({
+      name: 'plan_evidence',
+      description: 'List the evidence types PayPal accepts for this dispute reason, which ones it requested, and which the merchant can actually produce.',
+      risk: RISK.READ,
+      run: async () => {
+        const dispute = await loadDispute();
+        if (!context.matchedOrder) context.matchedOrder = await matchingOrder(dispute);
+        if (!context.fulfillment) context.fulfillment = await resolveCaseFulfillment(dispute, context.matchedOrder, context.transaction);
+        const order = applyFulfillment(context.matchedOrder, context.fulfillment);
+        if (!context.plan) context.plan = evidencePlan({ dispute, order });
+        return { allowed: context.plan.allowed, requested: context.plan.requested, preferred: context.plan.preferred, options: context.plan.options };
+      },
+    }),
+    defineTool({
+      name: 'record_fulfillment',
+      description: 'Record carrier and tracking for this case when no other source has it. This is merchant data, not evidence of delivery by PayPal.',
+      risk: RISK.WRITE,
+      args: { carrier: 'string', tracking_number: 'string', status: 'string?', shipped_at: 'ISO date?', delivered_at: 'ISO date?' },
+      run: async (args) => {
+        const check = validateFulfillment(args || {});
+        if (!check.ok) throw new Error(check.errors.join('; '));
+        await setManualFulfillment(disputeId, check.fulfillment);
+        context.fulfillment = null;
+        await logActivity(disputeId, 'Agent recorded fulfillment', `${check.fulfillment.carrier} · ${check.fulfillment.tracking_number}`);
+        return check.fulfillment;
+      },
+    }),
+    defineTool({
+      name: 'file_evidence',
+      description: 'File evidence with PayPal. Irreversible; reachable only through human approval, never by the planner.',
+      risk: RISK.IRREVERSIBLE,
+      run: async () => {
+        throw new Error('file_evidence must never be callable by the agent.');
+      },
+    }),
+  ]);
+}
+
+/**
+ * The no-model planner: a fixed decision procedure over the same tools, so the
+ * agent works with AI disabled and the loop stays reproducible. Simpler than a
+ * model, and honest about it.
+ */
+function deterministicProcedure(context) {
+  return procedurePlanner(async () => {
+    if (!context.dispute) return { thought: 'Load the dispute first.', tool: 'get_dispute', args: {} };
+    if (!context.transactionResolved) return { thought: 'Identify the payment behind the dispute.', tool: 'resolve_transaction', args: {} };
+    if (!context.fulfillment) return { thought: 'Resolve carrier and tracking across every source.', tool: 'get_fulfillment', args: {} };
+    if (!context.findings) return { thought: 'Compare the records against each other.', tool: 'cross_check', args: {} };
+    if (!context.plan) return { thought: 'Determine what PayPal will accept for this reason.', tool: 'plan_evidence', args: {} };
+    return { thought: 'Enough evidence gathered; hand the packet to the merchant.', done: true, reason: 'investigation_complete' };
+  });
+}
+
+/**
+ * Investigate one case with a bounded tool budget, then guarantee completeness
+ * deterministically. A planner may stop early or choose a shorter route; the
+ * packet must never depend on the planner being thorough.
+ */
+async function investigateCase(disputeId, { trigger = 'manual' } = {}) {
+  const context = { disputeId, dispute: null, matchedOrder: null, transaction: null, transactionResolved: false, fulfillment: null, findings: null, plan: null };
+  const catalog = caseToolCatalog(context);
+  const useModel = AI_ENABLED && aiConfigured();
+  const planner = useModel
+    ? llmPlanner({ generate: generateJSON, maxSteps: DEFAULT_MAX_STEPS })
+    : deterministicProcedure(context);
+
+  let investigation;
+  try {
+    investigation = await investigate({
+      goal: `Assemble a defensible evidence packet for dispute ${disputeId}.`,
+      catalog,
+      planner,
+      budget: { maxSteps: DEFAULT_MAX_STEPS },
+    });
+  } catch (error) {
+    investigation = { goal: 'investigate', stoppedReason: `planner_error: ${error.message}`, steps: 0, ms: 0, transcript: [] };
+  }
+  investigation.planner = useModel ? 'model' : 'deterministic';
+  investigation.irreversible_tools_hidden = irreversibleToolNames(catalog);
+
+  // Deterministic completion: fill anything the planner left behind.
+  try {
+    await catalog.get('get_dispute').run({});
+    await catalog.get('resolve_transaction').run({});
+    await catalog.get('find_merchant_order').run({});
+    await catalog.get('get_fulfillment').run({});
+    await catalog.get('cross_check').run({});
+    await catalog.get('plan_evidence').run({});
+  } catch (error) {
+    if (error.status === 404) throw error;
+    throw Object.assign(new Error(error.message || 'Investigation failed.'), { status: error.status || 502 });
+  }
+
+  return { context, investigation, catalog };
+}
+
+async function triageCase(disputeId, { trigger = 'manual' } = {}) {
+  // The agent investigates; the packet itself is still assembled deterministically.
+  const { context, investigation } = await investigateCase(disputeId, { trigger });
+  const dispute = context.dispute;
+  const order = context.matchedOrder;
+
   const { paypalTransaction, evidence, plan, deadline, order: effectiveOrder, fulfillment } = await assembleCase(dispute, order);
   const draft = deterministicDraft(dispute, effectiveOrder, evidence);
 
@@ -478,6 +695,14 @@ async function triageCase(disputeId, { trigger = 'manual' } = {}) {
     order: effectiveOrder,
     transaction: paypalTransaction ? { transaction_id: paypalTransaction.transaction_id, status: paypalTransaction.status, amount: paypalTransaction.amount } : null,
     engine: 'deterministic',
+    investigation: {
+      planner: investigation.planner,
+      stoppedReason: investigation.stoppedReason,
+      steps: investigation.steps,
+      ms: investigation.ms,
+      transcript: investigation.transcript,
+      irreversible_tools_hidden: investigation.irreversible_tools_hidden,
+    },
   };
 
   const rows = await packets();
@@ -485,7 +710,11 @@ async function triageCase(disputeId, { trigger = 'manual' } = {}) {
   filtered.unshift(packet);
   await writeStore(PACKETS_FILE, filtered.slice(0, 200));
 
-  await logActivity(dispute.id, `Case triaged (${trigger})`, `${evidence.length} source records linked · ${plan.allowed.length} evidence option(s) available · deadline ${deadline.label}`);
+  await logActivity(
+    dispute.id,
+    `Case triaged (${trigger})`,
+    `${evidence.length} source records linked · ${plan.allowed.length} evidence option(s) available · deadline ${deadline.label} · agent: ${investigation.planner}, ${investigation.steps} step(s), ${investigation.stoppedReason}`,
+  );
   sseBroadcast('triage', { disputeId: dispute.id, trigger, deadline, evidenceCount: evidence.length, at: packet.preparedAt });
   return packet;
 }

@@ -164,11 +164,38 @@ function renderCase({ dispute, order, activity, source, paypalTransaction, deadl
     $('#metric-sources').textContent = String(fallback.length).padStart(2, '0');
   } else renderEvidence([]);
   renderActivity(activity, source);
+  renderAgent({ packet });
   renderOverview();
 }
 function renderEvidence(items = []) {
   $('#evidence-count').textContent = String(items.length);
   $('#evidence-list').innerHTML = items.map(item => `<article class="evidence-item"><span class="evidence-icon ${evidenceIcon(item.title) === '↗' ? 'parcel' : ''}">${evidenceIcon(item.title)}</span><div class="evidence-copy"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.source)} <span>·</span> ${date(item.at, { month: 'short', day: 'numeric' })}</small></div>${originTag(item.origin)}<span class="evidence-check">✓</span></article>`).join('') || '<p class="empty-evidence">No evidence was linked to this case yet.</p>';
+}
+function renderAgent(caseData) {
+  const card = $('#agent-card');
+  if (!card) return;
+  const investigation = caseData?.packet?.investigation;
+  if (!investigation || !(investigation.transcript || []).length) return card.classList.add('hidden');
+  card.classList.remove('hidden');
+  $('#agent-note').textContent =
+    `${investigation.planner} planner · ${investigation.steps} step${investigation.steps === 1 ? '' : 's'} · stopped: ${String(investigation.stoppedReason).replaceAll('_', ' ')}`;
+  $('#agent-transcript').innerHTML = investigation.transcript.map(entry => {
+    const failed = Boolean(entry.error) || Boolean(entry.blocked);
+    const detail = entry.error ? `Failed: ${entry.error}` : entry.blocked ? entry.blocked : summariseToolResult(entry.result);
+    return `<div class="workspace-row event-row"><span class="urgency-dot ${failed ? 'overdue' : 'ok'}"></span><div><strong>${escapeHtml(entry.tool || 'unknown')}</strong><small>${escapeHtml(entry.why || '')}</small>${detail ? `<p class="event-error">${escapeHtml(detail)}</p>` : ''}</div></div>`;
+  }).join('');
+}
+function summariseToolResult(result) {
+  if (result === null || result === undefined) return 'Nothing found.';
+  if (typeof result !== 'object') return String(result).slice(0, 140);
+  const parts = [];
+  for (const [key, value] of Object.entries(result)) {
+    if (value === null || value === undefined || value === '') continue;
+    const text = Array.isArray(value) ? (value.length ? value.join(', ') : '') : typeof value === 'object' ? JSON.stringify(value) : String(value);
+    if (text) parts.push(`${key}: ${text}`);
+    if (parts.join(' · ').length > 150) break;
+  }
+  return parts.length ? parts.join(' · ').slice(0, 180) : 'Nothing found.';
 }
 function renderActivity(items = [], source = 'Fixture demo') {
   const activity = [...items];
