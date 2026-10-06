@@ -661,7 +661,7 @@ async function investigateCase(disputeId, { trigger = 'manual' } = {}) {
   return { context, investigation, catalog };
 }
 
-async function triageCase(disputeId, { trigger = 'manual' } = {}) {
+async function triageCase(disputeId, { trigger = 'manual', broadcast = true } = {}) {
   // The agent investigates; the packet itself is still assembled deterministically.
   const { context, investigation } = await investigateCase(disputeId, { trigger });
   const dispute = context.dispute;
@@ -715,7 +715,10 @@ async function triageCase(disputeId, { trigger = 'manual' } = {}) {
     `Case triaged (${trigger})`,
     `${evidence.length} source records linked · ${plan.allowed.length} evidence option(s) available · deadline ${deadline.label} · agent: ${investigation.planner}, ${investigation.steps} step(s), ${investigation.stoppedReason}`,
   );
-  sseBroadcast('triage', { disputeId: dispute.id, trigger, deadline, evidenceCount: evidence.length, at: packet.preparedAt });
+  // Only announce work the browser did NOT ask for. Broadcasting on an
+  // analyze the client itself triggered made the client reload and re-analyze,
+  // which broadcast again — an infinite refresh loop.
+  if (broadcast) sseBroadcast('triage', { disputeId: dispute.id, trigger, deadline, evidenceCount: evidence.length, at: packet.preparedAt });
   return packet;
 }
 
@@ -1031,7 +1034,7 @@ async function analyze(payload) {
       engineReason: AI_ENABLED ? 'Rules-based analysis · no AI provider configured' : 'Rules-based analysis · AI disabled',
     });
 
-  await triageCase(id, { trigger: 'analyze' }).catch(() => {});
+  await triageCase(id, { trigger: 'analyze', broadcast: false }).catch(() => {});
   return analysis;
 }
 
@@ -1225,7 +1228,41 @@ const server = http.createServer(async (req, res) => {
         ...order,
         paypal: await fetchPayPalTransaction(order.paypal_transaction_id),
       }));
-      return send(res, 200, { orders: enriched });
+
+      // A case may have resolved fulfilment with no matching merchant order —
+      // a manual entry, or tracking read from PayPal. Those are real records and
+      // must appear here, or the Orders view silently omits the newest data.
+      const disputes = MODE === 'sandbox' ? (await listSandboxCases()).cases : await listFixtureCases();
+      const resolved = await mapLimit(disputes, 3, async (dispute) => {
+        const matched = await matchingOrder(dispute);
+        const { fulfillment, order } = await assembleCase(dispute, matched);
+        if (!order) return null;
+        return {
+          disputeId: dispute.id,
+          reason: dispute.reason,
+          status: dispute.status || null,
+          due: dispute.seller_response_due_date || null,
+          amount: dispute.dispute_amount || null,
+          matched_local_order: Boolean(matched),
+          order,
+          fulfillment,
+        };
+      });
+      return send(res, 200, { orders: enriched, resolved: resolved.filter(Boolean) });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/evidence') {
+      // One cross-case evidence view instead of the browser re-deriving a
+      // fixture-shaped copy of it.
+      const disputes = MODE === 'sandbox' ? (await listSandboxCases()).cases : await listFixtureCases();
+      const perCase = await mapLimit(disputes, 3, async (dispute) => {
+        const matched = await matchingOrder(dispute);
+        const { evidence } = await assembleCase(dispute, matched);
+        return evidence.map((item) => ({ ...item, disputeId: dispute.id, reason: dispute.reason }));
+      });
+      const evidence = perCase.flat();
+      const byOrigin = evidence.reduce((acc, item) => { acc[item.origin] = (acc[item.origin] || 0) + 1; return acc; }, {});
+      return send(res, 200, { evidence, byOrigin, cases: disputes.length });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/events') {

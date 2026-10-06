@@ -217,18 +217,64 @@ function renderOverview() {
   $('#overview-readiness').innerHTML = `<div class="readiness-item"><strong>${sourceCount} linked source${sourceCount === 1 ? '' : 's'}</strong>${order ? `Order ${escapeHtml(order.order_id)} is matched to the selected case.` : 'No local order has been matched to the selected case.'}</div><div class="readiness-item"><strong>${state.config.aiConfigured ? 'AI drafting enabled' : 'AI drafting not configured'}</strong>${state.config.aiConfigured ? 'Drafts are checked for source citations before they are shown.' : 'The current draft uses deterministic local rules.'}</div>`;
   document.querySelectorAll('.open-case').forEach(button => button.addEventListener('click', () => { setPage('disputes'); loadCase(button.dataset.case); }));
 }
+function fulfillmentLine(fulfillment = {}) {
+  const f = fulfillment.fulfillment || {};
+  if (!f.carrier && !f.tracking_number) return 'No carrier or tracking from any source';
+  const parts = [f.carrier, f.tracking_number, f.status].filter(Boolean);
+  return parts.join(' · ') + (fulfillment.primary_source ? ` · source: ${fulfillment.primary_source}` : '');
+}
+
 function renderOrders() {
-  $('#orders-count').textContent = `${state.orders.length} local order record${state.orders.length === 1 ? '' : 's'}`;
-  $('#orders-list').innerHTML = state.orders.map(order => {
-    const linked = state.cases.find(item => item.disputed_transactions?.some(tx => tx.invoice_number === order.invoice_number || tx.seller_transaction_id === order.paypal_transaction_id || tx.transaction_id === order.paypal_transaction_id));
-    return `<div class="workspace-row"><span class="case-symbol shipping">↗</span><div><strong>${escapeHtml(order.item)} · ${escapeHtml(order.order_id)}</strong><small>Local record · ${escapeHtml(order.customer)} · ${escapeHtml(order.currency)} ${escapeHtml(order.amount)} · ${escapeHtml(order.fulfillment.delivery_status)}</small></div>${linked ? `<button class="quiet-button open-case" data-case="${escapeHtml(linked.id)}">Open case</button>` : '<small>Not linked to a live PayPal dispute</small>'}</div>`;
+  const resolved = state.resolved || [];
+  const orders = state.orders || [];
+  const wire = () => document.querySelectorAll('#orders-list .open-case').forEach(button =>
+    button.addEventListener('click', () => { setPage('disputes'); loadCase(button.dataset.case); }));
+
+  const resolvedRows = resolved.map(entry => {
+    const order = entry.order || {};
+    const origin = order.fulfillment_origin || 'local';
+    const title = order.order_id
+      ? `${order.item || 'Order'} · ${order.order_id}`
+      : `Resolved fulfilment · ${entry.disputeId}`;
+    const meta = [`Case ${entry.disputeId}`, fulfillmentLine(entry.fulfillment)];
+    return `<div class="workspace-row"><span class="case-symbol shipping">↗</span>${originTag(origin)}<div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(meta.join(' · '))}</small></div><button class="quiet-button open-case" data-case="${escapeHtml(entry.disputeId)}">Open case</button></div>`;
   }).join('');
-  document.querySelectorAll('#orders-list .open-case').forEach(button => button.addEventListener('click', () => { setPage('disputes'); loadCase(button.dataset.case); }));
+
+  const fileRows = orders.map(order => {
+    const linked = state.cases.find(item => item.disputed_transactions?.some(tx =>
+      tx.invoice_number === order.invoice_number
+      || tx.seller_transaction_id === order.paypal_transaction_id
+      || tx.transaction_id === order.paypal_transaction_id));
+    const status = order.fulfillment?.delivery_status || order.fulfillment?.status || 'status unknown';
+    return `<div class="workspace-row"><span class="case-symbol shipping">↗</span>${originTag('local')}<div><strong>${escapeHtml(order.item)} · ${escapeHtml(order.order_id)}</strong><small>${escapeHtml(order.customer)} · ${escapeHtml(order.currency)} ${escapeHtml(order.amount)} · ${escapeHtml(status)}</small></div>${linked ? `<button class="quiet-button open-case" data-case="${escapeHtml(linked.id)}">Open case</button>` : '<small>Not linked to a live dispute</small>'}</div>`;
+  }).join('');
+
+  $('#orders-count').textContent = `${resolved.length} case fulfilment record${resolved.length === 1 ? '' : 's'} · ${orders.length} merchant order${orders.length === 1 ? '' : 's'}`;
+  $('#orders-list').innerHTML =
+    (resolvedRows ? `<p class="list-label">Resolved for a case</p>${resolvedRows}` : '')
+    + (fileRows ? `<p class="list-label">Merchant order records</p>${fileRows}` : '')
+    + (!resolvedRows && !fileRows ? '<p class="empty-evidence">No orders or resolved fulfilment yet.</p>' : '');
+  wire();
 }
 function renderEvidenceLibrary() {
-  const records = state.orders.flatMap(order => [{ title: `Carrier scan: ${order.fulfillment.delivery_status}`, detail: `${order.order_id} · ${order.fulfillment.carrier} · ${order.fulfillment.tracking_number}` }, ...order.communications.map(message => ({ title: message.summary, detail: `${order.order_id} · ${message.channel}` }))]);
-  $('#evidence-library-count').textContent = `${records.length} local evidence record${records.length === 1 ? '' : 's'}`;
-  $('#evidence-library-list').innerHTML = records.map(record => `<div class="workspace-row"><span class="evidence-icon">↗</span><div><strong>${escapeHtml(record.title)}</strong><small>${escapeHtml(record.detail)}</small></div></div>`).join('');
+  const all = state.evidence || [];
+  const counts = state.evidenceByOrigin || {};
+  const summary = Object.entries(counts).map(([origin, n]) => `${n} ${origin}`).join(' · ');
+  $('#evidence-library-count').textContent = all.length
+    ? `${all.length} evidence record${all.length === 1 ? '' : 's'} across ${state.caseCount || 0} case${state.caseCount === 1 ? '' : 's'}${summary ? ` (${summary})` : ''}`
+    : 'No evidence recorded yet';
+  $('#evidence-library-list').innerHTML = all.length
+    ? all.map(item => `<div class="workspace-row"><span class="evidence-icon">${/carrier|tracking|delivery/i.test(item.title || '') ? '↗' : '✉'}</span>${originTag(item.origin)}<div><strong>${escapeHtml(item.title || 'Evidence')}</strong><small>${escapeHtml(item.source || '')} · case ${escapeHtml(item.disputeId || '')} · ${date(item.at, { month: 'short', day: 'numeric' })}</small></div></div>`).join('')
+    : '<p class="empty-evidence">Nothing has been assembled yet. Open a case and run the analysis.</p>';
+}
+async function loadEvidence() {
+  try {
+    const result = await api('/api/evidence');
+    state.evidence = result.evidence || [];
+    state.evidenceByOrigin = result.byOrigin || {};
+    state.caseCount = result.cases || 0;
+    renderEvidenceLibrary();
+  } catch (error) { showToast(error.message, true); }
 }
 function filterCases(cases) {
   if (state.caseFilter === 'review') return cases.filter(item => item.status === 'WAITING_FOR_SELLER_RESPONSE');
@@ -242,11 +288,11 @@ function renderCaseList(cases = []) {
   $('#metric-open').textContent = String(cases.length).padStart(2, '0');
   $('#metric-review').textContent = String(cases.filter(item => item.status === 'WAITING_FOR_SELLER_RESPONSE').length).padStart(2, '0');
   const earliest = cases.filter(item => item.seller_response_due_date).sort((a, b) => new Date(a.seller_response_due_date) - new Date(b.seller_response_due_date))[0];
-  $('#metric-risk').textContent = earliest ? money(earliest.dispute_amount) : '$—';
-  $('#metric-risk-note').textContent = earliest ? 'Next case deadline' : 'No deadline provided';
+  $('#metric-risk').textContent = earliest
+    ? `${Math.max(0, Math.ceil((new Date(earliest.seller_response_due_date) - Date.now()) / 86400000))} days`
+    : '—';
+  $('#metric-risk-note').textContent = earliest ? `${money(earliest.dispute_amount)} disputed` : 'No deadline provided';
   $('#metric-due').textContent = earliest ? date(earliest.seller_response_due_date, { month: 'short', day: 'numeric' }).toUpperCase() : '—';
-  const sourceCount = state.caseData?.order?.communications?.length;
-  $('#metric-sources').textContent = sourceCount === undefined ? '—' : String(sourceCount + 1).padStart(2, '0');
   if (!visibleCases.length) {
     list.innerHTML = '<div class="empty-cases">No disputes were returned by this PayPal Sandbox app yet.<br><br>Connect a Sandbox buyer and business transaction, create a dispute, then refresh.</div>';
     state.activeId = null;
@@ -281,11 +327,39 @@ async function loadCases() {
 async function loadOrders() {
   const result = await api('/api/orders');
   state.orders = result.orders || [];
+  state.resolved = result.resolved || [];
   renderOrders();
-  renderEvidenceLibrary();
+}
+
+/**
+ * Reload everything the server owns, WITHOUT re-running analysis.
+ *
+ * Server-pushed refreshes must never trigger work that pushes again: doing so
+ * made analyze -> triage broadcast -> reload -> analyze an infinite loop, which
+ * is what made the page flicker and the metric counters flip.
+ */
+let refreshTimer = null;
+function scheduleRefresh(delay = 250) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    try {
+      const result = await api('/api/cases');
+      const cases = result.cases || [];
+      state.cases = cases;
+      $('.nav-count').textContent = String(cases.length);
+      renderCaseList(cases);
+      renderOverview();
+      if (state.activeId && cases.some(item => item.id === state.activeId)) {
+        await loadCase(state.activeId, false);
+      }
+      loadOrders().catch(() => {});
+    } catch { /* a push refresh is best-effort */ }
+  }, delay);
 }
 async function runAnalysis() {
   if (!state.caseData) return;
+  if (state.analyzing) return;
+  state.analyzing = true;
   $('#regenerate').disabled = true; $('#regenerate').textContent = '◌ Preparing…';
   try {
     const result = await api('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(state.caseData) });
@@ -307,7 +381,7 @@ async function runAnalysis() {
     const linked = result.sourcesLinked || {};
     $('#draft-provenance').textContent = `Draft from ${count} linked source${count === 1 ? '' : 's'} · ${linked.paypal || 0} from PayPal, ${linked.local || 0} local${linked.buyer ? `, ${linked.buyer} from the buyer` : ''}`;
   } catch (error) { showToast(error.message, true); }
-  finally { $('#regenerate').disabled = false; $('#regenerate').innerHTML = '↻ Re-draft'; }
+  finally { state.analyzing = false; $('#regenerate').disabled = false; $('#regenerate').innerHTML = '↻ Re-draft'; }
 }
 function updateCount() { $('#char-count').textContent = `${$('#draft').value.length.toLocaleString()} / 2,000`; }
 function openApproval() {
@@ -367,8 +441,15 @@ $('#metric-sources-card').addEventListener('click', () => $('#detail-panel').scr
 $('#nav-overview').addEventListener('click', event => { event.preventDefault(); setPage('overview'); renderOverview(); });
 $('#nav-disputes').addEventListener('click', event => { event.preventDefault(); setPage('disputes'); });
 $('#nav-orders').addEventListener('click', event => { event.preventDefault(); setPage('orders'); renderOrders(); });
-$('#nav-evidence').addEventListener('click', event => { event.preventDefault(); setPage('evidence'); renderEvidenceLibrary(); });
-$('#nav-webhooks').addEventListener('click', event => { event.preventDefault(); setPage('webhooks'); loadEvents(); loadWatchdog(); loadAttempts(); });
+$('#nav-evidence').addEventListener('click', event => { event.preventDefault(); setPage('evidence'); loadEvidence(); });
+// Webhooks is infrastructure, not part of the merchant workspace, so it lives
+// behind a diagnostics link rather than in the sidebar.
+function openDiagnostics(event) {
+  if (event) event.preventDefault();
+  setPage('webhooks');
+  loadEvents(); loadWatchdog(); loadAttempts();
+}
+if ($('#diagnostics-link')) $('#diagnostics-link').addEventListener('click', openDiagnostics);
 $('#overview-open-case').addEventListener('click', () => { if (!state.activeId) return showToast('Select a live case first.', true); setPage('disputes'); loadCase(state.activeId); });
 $('#see-order').addEventListener('click', () => setPage('orders'));
 $('#full-history').addEventListener('click', () => { state.showAllActivity = !state.showAllActivity; $('#full-history').innerHTML = state.showAllActivity ? 'Show recent <span>→</span>' : 'Full history <span>→</span>'; renderActivity(state.caseData?.activity || [], state.caseData?.source); });
@@ -400,7 +481,7 @@ try { state.config = await api('/api/config'); } catch { /* Local fixture defaul
 if (state.config.mode === 'fixture') document.body.classList.add('fixture');
 if (state.config.mode === 'sandbox') $('#check-access').classList.remove('hidden');
 if (state.config.aiEnabled && state.config.aiConfigured) $('#check-ai').classList.remove('hidden');
-try { await Promise.all([loadCases(), loadOrders()]); } catch (error) { showToast(error.message, true); }
+try { await Promise.all([loadCases(), loadOrders(), loadEvidence()]); } catch (error) { showToast(error.message, true); }
 const initialPage = window.location.hash.slice(1);
 setPage(['overview', 'disputes', 'orders', 'evidence', 'webhooks'].includes(initialPage) ? initialPage : 'disputes');
 
@@ -489,15 +570,15 @@ function connectEventStream() {
     const payload = JSON.parse(event.data || '{}');
     showToast(payload.simulated ? `Simulated ${payload.label || 'event'} received.` : `${payload.label || 'Dispute event'} received from PayPal.`);
     loadEvents();
-    if (payload.disputeId) loadCases().catch(() => {});
+    scheduleRefresh();
   });
   source.addEventListener('triage', event => {
     const payload = JSON.parse(event.data || '{}');
     showToast(`Case ${payload.disputeId} triaged automatically (${payload.trigger}).`);
-    loadCases().catch(() => {});
+    scheduleRefresh();
     loadWatchdog().catch(() => {});
   });
-  source.addEventListener('case-updated', () => { loadCases().catch(() => {}); });
+  source.addEventListener('case-updated', () => scheduleRefresh());
   source.addEventListener('webhook-attempt', () => { loadAttempts().catch(() => {}); });
   return source;
 }
