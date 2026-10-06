@@ -483,7 +483,9 @@ function openDiagnostics(event) {
   setPage('webhooks');
   loadEvents(); loadWatchdog(); loadAttempts();
 }
-if ($('#diagnostics-link')) $('#diagnostics-link').addEventListener('click', openDiagnostics);
+// No visible link: the diagnostics page is reachable at #webhooks, which keeps
+// the merchant workspace free of infrastructure chrome without losing access.
+if (window.location.hash.slice(1) === 'webhooks') openDiagnostics();
 $('#overview-open-case').addEventListener('click', () => { if (!state.activeId) return showToast('Select a live case first.', true); setPage('disputes'); loadCase(state.activeId); });
 $('#see-order').addEventListener('click', () => setPage('orders'));
 $('#full-history').addEventListener('click', () => { state.showAllActivity = !state.showAllActivity; $('#full-history').innerHTML = state.showAllActivity ? 'Show recent <span>→</span>' : 'Full history <span>→</span>'; renderActivity(state.caseData?.activity || [], state.caseData?.source); });
