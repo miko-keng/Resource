@@ -6,9 +6,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { aiConfig, aiConfigured, aiHealthCheck, generateJSON } from './lib/ai.mjs';
 import {
+  applyFulfillment,
+  resolveFulfillment,
+  validateFulfillment,
+} from './lib/fulfillment.mjs';
+import {
   allowedEvidenceTypes,
   buildEvidence,
   buildEvidenceEntry,
+  crossCheck,
   deadlineInfo,
   deterministicDraft,
   deterministicMissing,
@@ -71,6 +77,7 @@ const ACTIVITY_FILE = path.join(LOCAL, 'activity.json');
 const EVENTS_FILE = path.join(LOCAL, 'events.json');
 const PACKETS_FILE = path.join(LOCAL, 'packets.json');
 const ATTEMPTS_FILE = path.join(LOCAL, 'attempts.json');
+const FULFILLMENT_FILE = path.join(LOCAL, 'fulfillment.json');
 const detailCache = new Map();
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15_000);
 const MAX_LIST_PAGES = Number(process.env.MAX_LIST_PAGES || 5);
@@ -305,6 +312,9 @@ function normalizeTransaction(source, pathUsed) {
     updated_at: info.transaction_updated_date || source.update_time || null,
     payer_name: fullName || null,
     payer_email: payer.email_address || null,
+    // Genuine, currently unused: tells the merchant whether PayPal considers
+    // this payment eligible for seller protection, and for which categories.
+    seller_protection: source.seller_protection || null,
     item_names: (source.cart_info?.item_details || []).map((item) => item.item_name).filter(Boolean),
   };
 }
@@ -352,12 +362,80 @@ async function matchingOrder(dispute) {
 
 /* -------------------------------------------------------- case assembly */
 
+const manualFulfillments = () => readStore(FULFILLMENT_FILE);
+
+async function getManualFulfillment(disputeId) {
+  return (await manualFulfillments()).find((row) => row.disputeId === disputeId) || null;
+}
+
+async function setManualFulfillment(disputeId, fulfillment) {
+  const rows = (await manualFulfillments()).filter((row) => row.disputeId !== disputeId);
+  rows.unshift({ disputeId, at: new Date().toISOString(), ...fulfillment });
+  await writeStore(FULFILLMENT_FILE, rows.slice(0, 200));
+  invalidateDispute(disputeId);
+}
+
+async function clearManualFulfillment(disputeId) {
+  const rows = (await manualFulfillments()).filter((row) => row.disputeId !== disputeId);
+  await writeStore(FULFILLMENT_FILE, rows);
+  invalidateDispute(disputeId);
+}
+
+/**
+ * Tracking registered with PayPal against a transaction. Real, but only
+ * populated if the merchant or their platform pushed it there; returns null
+ * rather than a placeholder when there is nothing.
+ */
+async function fetchPayPalTracker(transactionId) {
+  if (!transactionId || MODE !== 'sandbox') return null;
+  const key = `tracker:${transactionId}`;
+  try {
+    const hit = detailCache.get(key);
+    let data;
+    if (hit && hit.expiresAt > Date.now()) data = hit.value;
+    else {
+      data = await paypal(`/v1/shipping/trackers?transaction_id=${encodeURIComponent(transactionId)}`);
+      detailCache.set(key, { value: data, expiresAt: Date.now() + 60_000 });
+    }
+    const tracker = (data.trackers || [])[0];
+    if (!tracker) return null;
+    return {
+      carrier: tracker.carrier || tracker.carrier_name || null,
+      tracking_number: tracker.tracking_number || null,
+      status: tracker.status || null,
+      shipped_at: tracker.shipment_date || tracker.shipped_at || null,
+      delivered_at: tracker.delivered_at || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask every provider in turn. A PayPal capture is deliberately absent: it has
+ * no shipping field, so it cannot answer this question.
+ */
+async function resolveCaseFulfillment(dispute, order, paypalTransaction) {
+  const disputeId = dispute?.id || dispute?.dispute_id || null;
+  const manual = disputeId ? await getManualFulfillment(disputeId) : null;
+  const tracker = await fetchPayPalTracker(disputeTransactionId(dispute));
+  return resolveFulfillment({
+    providers: [
+      { source: 'manual', fulfillment: manual },
+      { source: 'merchant-order', fulfillment: order?.fulfillment || null },
+      { source: 'paypal-tracker', fulfillment: tracker },
+    ],
+  });
+}
+
 async function assembleCase(dispute, order) {
   const paypalTransaction = await fetchPayPalTransaction(disputeTransactionId(dispute));
-  const evidence = buildEvidence(dispute, order, paypalTransaction);
-  const plan = evidencePlan({ dispute, order });
+  const fulfillment = await resolveCaseFulfillment(dispute, order, paypalTransaction);
+  const effectiveOrder = applyFulfillment(order, fulfillment);
+  const evidence = buildEvidence(dispute, effectiveOrder, paypalTransaction);
+  const plan = evidencePlan({ dispute, order: effectiveOrder });
   const deadline = deadlineInfo(dispute.seller_response_due_date);
-  return { paypalTransaction, evidence, plan, deadline };
+  return { paypalTransaction, fulfillment, order: effectiveOrder, evidence, plan, deadline };
 }
 
 /**
@@ -372,8 +450,8 @@ async function triageCase(disputeId, { trigger = 'manual' } = {}) {
   if (!dispute) throw Object.assign(new Error('That case was not found.'), { status: 404 });
 
   const order = await matchingOrder(dispute);
-  const { paypalTransaction, evidence, plan, deadline } = await assembleCase(dispute, order);
-  const draft = deterministicDraft(dispute, order, evidence);
+  const { paypalTransaction, evidence, plan, deadline, order: effectiveOrder, fulfillment } = await assembleCase(dispute, order);
+  const draft = deterministicDraft(dispute, effectiveOrder, evidence);
 
   const packet = {
     disputeId: dispute.id,
@@ -393,8 +471,11 @@ async function triageCase(disputeId, { trigger = 'manual' } = {}) {
     },
     plan,
     draft,
-    missing: deterministicMissing(dispute, order),
+    missing: deterministicMissing(dispute, effectiveOrder),
+    findings: crossCheck({ dispute, order: effectiveOrder, fulfillment, capture: paypalTransaction }),
     grounding: verifyClaims(draft, evidence),
+    fulfillment,
+    order: effectiveOrder,
     transaction: paypalTransaction ? { transaction_id: paypalTransaction.transaction_id, status: paypalTransaction.status, amount: paypalTransaction.amount } : null,
     engine: 'deterministic',
   };
@@ -474,12 +555,39 @@ async function recordEvent(event, { simulated = false, verified = true } = {}) {
     processed: false,
     triaged: false,
     error: null,
+    // Retained so an interrupted event can still be triaged after a restart.
+    payload: event,
   };
   rows.unshift(row);
   await writeStore(EVENTS_FILE, rows.slice(0, 500));
   if (disputeId) invalidateDispute(disputeId);
   sseBroadcast('webhook', { id: row.id, eventType: type, label: row.label, disputeId, simulated, verified, receivedAt: row.receivedAt });
   return { duplicate: false, row };
+}
+
+/**
+ * Resume events recorded but never processed.
+ *
+ * Triage normally runs inside the receiving request. A restart between storing
+ * the event and finishing that work would strand the row at
+ * `processed: false` forever — which is exactly what a platform spinning an
+ * idle instance down mid-flight produces. Re-run them once at boot.
+ */
+async function resumePendingEvents() {
+  const rows = await events();
+  const pending = rows.filter((row) => row.processed === false);
+  if (!pending.length) return 0;
+  console.log(`[recourse] resuming ${pending.length} unprocessed webhook event(s)`);
+  for (const row of pending) {
+    const event = row.payload || { id: row.id, event_type: row.eventType, resource: { dispute_id: row.disputeId } };
+    try {
+      await processEvent(event, row);
+    } catch (error) {
+      // Mark it so a permanent failure cannot loop forever.
+      await updateEvent(row.id, { processed: true, error: error.message || 'Resume failed' });
+    }
+  }
+  return pending.length;
 }
 
 async function updateEvent(id, patch) {
@@ -572,9 +680,10 @@ async function processEvent(event, row) {
  * generated by a model.
  */
 async function analyzeDeterministic(dispute, order, { engineReason }) {
-  const { paypalTransaction, evidence, plan, deadline } = await assembleCase(dispute, order);
-  const draft = deterministicDraft(dispute, order, evidence);
+  const { paypalTransaction, evidence, plan, deadline, order: effectiveOrder, fulfillment } = await assembleCase(dispute, order);
+  const draft = deterministicDraft(dispute, effectiveOrder, evidence);
   const grounding = verifyClaims(draft, evidence);
+  const findings = crossCheck({ dispute, order: effectiveOrder, fulfillment, capture: paypalTransaction });
 
   await logActivity(dispute.id, 'Deterministic analysis prepared', `${engineReason} · ${evidence.length} source record(s) linked`);
 
@@ -585,12 +694,14 @@ async function analyzeDeterministic(dispute, order, { engineReason }) {
     provenance: engineReason,
     summary: `The buyer opened a dispute for ${reasonLabel(dispute.reason).toLowerCase()}${order?.item ? ` involving ${order.item}` : ''}. Recourse linked ${evidence.length} source record${evidence.length === 1 ? '' : 's'} and found ${plan.allowed.length} evidence option${plan.allowed.length === 1 ? '' : 's'} PayPal accepts for this reason.`,
     evidence,
-    missing: deterministicMissing(dispute, order),
-    contradictions: [],
+    missing: deterministicMissing(dispute, effectiveOrder),
+    findings,
+    contradictions: findings.risks.map((risk) => risk.code),
     draft,
-    confidence: order?.fulfillment?.delivery_status === 'Delivered' ? 'Moderate' : 'Low',
+    confidence: effectiveOrder?.fulfillment?.delivery_status === 'Delivered' ? 'Moderate' : 'Low',
     explanation: 'This draft is assembled directly from the linked source records. Every checkable claim is matched back to them.',
     grounding,
+    fulfillment,
     paypalTransaction,
     plan,
     deadline,
@@ -600,7 +711,7 @@ async function analyzeDeterministic(dispute, order, { engineReason }) {
       buyer: evidence.filter((item) => item.origin === 'buyer').length,
     },
     ai: { used: false, enabled: AI_ENABLED, configured: aiConfigured(), code: AI_ENABLED ? 'AI_NOT_CONFIGURED' : 'AI_DISABLED' },
-    order,
+    order: effectiveOrder,
   };
 }
 
@@ -609,7 +720,7 @@ async function analyzeDeterministic(dispute, order, { engineReason }) {
  * Kept intact so the AI path can be reinstated with a single env change.
  */
 async function analyzeWithModel(dispute, order) {
-  const { paypalTransaction, evidence, plan, deadline } = await assembleCase(dispute, order);
+  const { paypalTransaction, evidence, plan, deadline, order: effectiveOrder, fulfillment } = await assembleCase(dispute, order);
 
   const schema = {
     type: 'object',
@@ -651,8 +762,9 @@ async function analyzeWithModel(dispute, order) {
     provenance: `AI model · ${result.provider} · ${result.model} · grounded draft`,
     summary: `The buyer opened a dispute for ${reasonLabel(dispute.reason).toLowerCase()}. Recourse linked ${evidence.length} source records.`,
     evidence,
-    missing: deterministicMissing(dispute, order),
+    missing: deterministicMissing(dispute, effectiveOrder),
     contradictions: Array.isArray(output.contradiction_codes) ? output.contradiction_codes : [],
+    fulfillment,
     draft,
     confidence: ['Low', 'Moderate', 'High'].includes(output.confidence) ? output.confidence : 'Moderate',
     explanation: 'The draft is composed from the linked source records and every checkable claim was matched back to them.',
@@ -666,7 +778,7 @@ async function analyzeWithModel(dispute, order) {
       buyer: evidence.filter((item) => item.origin === 'buyer').length,
     },
     ai: { used: true, enabled: true, configured: true, provider: result.provider, model: result.model, attempts: result.attempts },
-    order,
+    order: effectiveOrder,
   };
 }
 
@@ -742,7 +854,10 @@ async function submitEvidence(payload) {
 
   await logActivity(id, 'Merchant approved response', `Evidence type: ${evidenceType}; approval recorded before any PayPal action.`);
 
-  const order = await matchingOrder(current);
+  // Use the resolved fulfillment, not only the local order: a manually recorded
+  // or PayPal-sourced tracking number must be what gets filed.
+  const matchedOrder = await matchingOrder(current);
+  const order = applyFulfillment(matchedOrder, await resolveCaseFulfillment(current, matchedOrder, null));
   let result;
   if (MODE === 'sandbox') {
     try {
@@ -815,12 +930,13 @@ async function getCase(id) {
     await logActivity(id, retrievalEvent, MODE === 'fixture' ? 'Synthetic case details loaded; no PayPal request was sent.' : 'Fresh dispute details retrieved from the PayPal Sandbox API.');
   }
 
-  const order = await matchingOrder(dispute);
-  const { paypalTransaction, evidence, plan, deadline } = await assembleCase(dispute, order);
+  const matchedOrder = await matchingOrder(dispute);
+  const { paypalTransaction, evidence, plan, deadline, order, fulfillment } = await assembleCase(dispute, matchedOrder);
 
   return {
     dispute,
     order,
+    fulfillment,
     paypalTransaction,
     evidence,
     plan,
@@ -1008,6 +1124,24 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { received: true, simulated: true, verified: false, duplicate: recorded.duplicate, event });
     }
 
+    const fulfillmentRoute = url.pathname.match(/^\/api\/cases\/([^/]+)\/fulfillment$/);
+    if (fulfillmentRoute && req.method === 'POST') {
+      const caseId = decodeURIComponent(fulfillmentRoute[1]);
+      const result = validateFulfillment(await body(req));
+      if (!result.ok) return send(res, 422, { error: result.errors.join('; '), errors: result.errors });
+      await setManualFulfillment(caseId, result.fulfillment);
+      await logActivity(caseId, 'Manual fulfillment recorded', `${result.fulfillment.carrier} · ${result.fulfillment.tracking_number}`);
+      sseBroadcast('case-updated', { disputeId: caseId, reason: 'fulfillment-recorded' });
+      return send(res, 200, { fulfillment: result.fulfillment, disputeId: caseId });
+    }
+    if (fulfillmentRoute && req.method === 'DELETE') {
+      const caseId = decodeURIComponent(fulfillmentRoute[1]);
+      await clearManualFulfillment(caseId);
+      await logActivity(caseId, 'Manual fulfillment cleared', 'The merchant removed their manual tracking entry.');
+      sseBroadcast('case-updated', { disputeId: caseId, reason: 'fulfillment-cleared' });
+      return send(res, 200, { cleared: true, disputeId: caseId });
+    }
+
     const triageRoute = url.pathname.match(/^\/api\/triage\/([^/]+)$/);
     if (req.method === 'POST' && triageRoute) {
       const packet = await triageCase(decodeURIComponent(triageRoute[1]), { trigger: 'manual' });
@@ -1060,4 +1194,8 @@ server.listen(PORT, HOST, () => {
   console.log(`Recourse is running at http://${HOST}:${PORT} · mode=${MODE}${DEMO_READONLY ? ' · READ-ONLY demo' : ''}`);
   console.log(`Engine: deterministic evidence + approval gate · AI: ${AI_ENABLED ? `enabled (${AI_PROVIDER_LABEL})` : 'DISABLED (AI_ENABLED=false)'}`);
   console.log(`Webhooks: ${process.env.PAYPAL_WEBHOOK_ID ? 'signature verification enabled' : 'PAYPAL_WEBHOOK_ID not set (simulation only)'} · lifecycle events: ${Object.keys(WEBHOOK_LIFECYCLE).length}`);
+  // After listen, so a slow triage never delays binding the port.
+  resumePendingEvents()
+    .then((count) => { if (count) console.log(`[recourse] resumed ${count} interrupted event(s)`); })
+    .catch((error) => console.error('[recourse] resume failed:', error.message));
 });

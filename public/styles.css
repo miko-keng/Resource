@@ -37,3 +37,8 @@
 .webhook-note{margin-top:14px;padding:12px 14px;font-size:8px;line-height:1.6;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted)}
 .webhook-note code{font-size:8px;background:#f2f3ee;padding:1px 4px;border-radius:3px}
 .deadline-text.deadline-urgent{color:var(--coral)}
+
+/* --- findings: supports, manual provenance (added) --- */
+.origin-manual{border-color:#d8cdf0;background:#f4effc;color:var(--purple)}
+.support-note{border-color:#bfe0cd;background:var(--lime)}
+.support-note span{color:var(--green)}

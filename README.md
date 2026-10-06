@@ -2,7 +2,70 @@
 
 Recourse helps small merchants review PayPal disputes with their order and fulfillment records in one place. It surfaces relevant evidence, missing facts, and an editable response draft. The merchant stays in control: a response is sent only after a separate approval step.
 
-> **Current build status:** fixture and PayPal Sandbox modes are available. Sandbox OAuth and real dispute retrieval have been verified with dispute `PP-R-LEL-10190268` in the local development environment. The first linked order uses synthetic fulfillment records for demo purposes; those records are labeled and are not presented as PayPal evidence of delivery.
+> **PayPal tells you a dispute opened. Recourse tells you what to file, and why it is defensible.**
+
+> **Current build status:** fixture and PayPal Sandbox modes are available. Sandbox OAuth and real dispute retrieval have been verified with dispute `PP-R-LEL-10190268` in the local development environment. The first linked order uses synthetic fulfillment records.
+
+## Why not just use PayPal's Resolution Center?
+
+It is the first question this project has to answer, so here it is directly.
+
+The Resolution Center is where a merchant **files**. It shows the case, the buyer's claim, the message thread and the deadline, and it lets a human take every action: provide evidence, message, accept, escalate, offer. For a merchant with one dispute a year, it is the right tool and nothing here improves on it.
+
+Its limit is not a missing feature, it is a boundary. **PayPal cannot see the merchant's order system.** It cannot know whether the merchant shipped, under what tracking, or what was said to the buyer. So the real work of a dispute is not "respond to the case" — it is finding which order this is, locating the tracking, checking the carrier, digging through the inbox, and copying it all back. The dashboard is where you file. The work happens everywhere else.
+
+Recourse does the work that happens before you get there, and it does four things the Resolution Center structurally cannot:
+
+1. **Joins the dispute to your order records.** Carrier and tracking come from a provider chain (see below), not from PayPal, because PayPal does not hold them.
+2. **Enforces which evidence PayPal accepts for that specific reason.** PayPal documents this per reason; it is arcane and it is not enforced anywhere in the UI. Recourse will refuse an invalid filing rather than let you send one.
+3. **Cross-checks the records against each other** — a delivery dated before shipment, a payment amount that does not match the dispute, a fulfilment conflict between two sources — and states separately what is actually defensible.
+4. **Acts when a case opens**, without anyone opening a page. A dispute arrives as a webhook event and is triaged before a merchant sees it. Nothing else waits for a human first.
+
+The honest limit: **Recourse cannot invent fulfilment data.** PayPal holds no tracking for the sandbox disputes in this repository — the capture object has no shipping field at all, and the Shipment Tracking API returns an empty list. When no source has the answer, Recourse reports a gap. It never fabricates an evidence record.
+
+Recourse **complements** PayPal rather than replacing it. Accept-claim, message, offer and escalate remain in PayPal; only the evidence path is implemented here. The framing to keep in mind is "the work that happens before the Resolution Center".
+
+## Where fulfilment comes from
+
+Carrier, tracking and delivery are resolved from a chain of providers. Each fact carries the provider that supplied it, and nothing is invented:
+
+| Provider | Source | Notes |
+| --- | --- | --- |
+| `manual` | `POST /api/cases/:id/fulfillment` | The merchant asserted it directly in Recourse. Labelled `MANUAL`. |
+| `merchant-order` | The merchant's order system | Today a local fixture in `data/orders.json`; in production an authenticated, tenant-scoped integration. Labelled `MERCHANT`. |
+| `paypal-tracker` | `GET /v1/shipping/trackers?transaction_id=…` | Real, but only populated if the merchant or their platform registered tracking with PayPal. Labelled `PAYPAL`. |
+
+Precedence is `manual` > `merchant-order` > `paypal-tracker`: a merchant's own assertion outranks a copy of it. When two providers disagree, the disagreement is surfaced as a finding rather than silently resolved.
+
+A PayPal **capture** is deliberately not a provider. It carries amount, status and `seller_protection` and has no shipping field, so treating it as a fulfilment source would mean inventing data.
+
+## What the cross-check looks for
+
+Findings carry a direction rather than being a flat list of errors.
+
+**Risks** — records that conflict, or that weaken the position:
+
+| Code | Trigger |
+| --- | --- |
+| `PARTIAL_DISPUTE` / `AMOUNT_MISMATCH` | The dispute amount differs from the payment amount. A buyer may legitimately dispute part of a payment, so this is a review item, not automatically an error. |
+| `DELIVERY_BEFORE_SHIPMENT` | The delivery date precedes the shipment date — the records contradict each other. |
+| `DELIVERY_AFTER_DISPUTE` | Delivery is recorded after the dispute was opened; the buyer may have been right at the time. |
+| `TRANSACTION_MISMATCH` | The matched order references a different transaction than the dispute. |
+| `REFUND_MENTIONED_NO_ID` | A refund is discussed but no PayPal refund id is linked. |
+| `FULFILLMENT_CONFLICT` | Two providers disagree about carrier, tracking or status. |
+
+**Supports** — facts that actively help:
+
+| Code | Trigger |
+| --- | --- |
+| `CLAIM_VS_DELIVERED` | The buyer claims non-receipt and the carrier recorded delivery before the dispute was opened. |
+| `SELLER_PROTECTION_ELIGIBLE` | PayPal marks the payment eligible for seller protection, with the qualifying categories. |
+
+**Gaps** — what is simply unknown. Two rules hold: no check fires on missing data (absence is a gap, never a risk), and every finding cites the source ids it came from.
+
+Known limitation: this data model does not collect a recipient signature or a delivery address, so Recourse makes no claim about either. That is a gap in the product, not a finding about a case.
+
+ for demo purposes; those records are labeled and are not presented as PayPal evidence of delivery.
 
 ## Start here
 
@@ -81,7 +144,8 @@ outputs/recourse/
 ├── data/                 # Synthetic dispute and order fixtures
 ├── lib/
 │   ├── ai.mjs            # Provider client: retry, timeout, model fallback, quota detection
-│   └── disputes.mjs      # Pure dispute logic: evidence plan, grounding, deadline watchdog
+│   ├── disputes.mjs      # Pure dispute logic: evidence plan, grounding, cross-check, deadline
+│   └── fulfillment.mjs   # Fulfillment resolver: provider chain, provenance, conflicts, gaps
 ├── public/               # Merchant UI (live webhook feed, dispute desk, evidence library)
 ├── tests/                # node:test unit + end-to-end suites (no dependencies)
 ├── .env.example          # Local-only configuration template
@@ -134,7 +198,7 @@ npm run test:unit     # pure logic + AI client (fetch mocked, offline)
 npm run test:e2e      # boots the real server against a stub PayPal
 ```
 
-The end-to-end suite starts the server with `PAYPAL_TEST_MODE=true` and `PAYPAL_API_BASE` pointed at a local stub, then asserts on the exact PayPal calls made. It covers: the approval gate (no approval → no PayPal call), the per-reason evidence rules, the requested-evidence rule, the HATEOAS action gate, the 2,000-character limit, a real submission reaching PayPal exactly once with the right evidence shape, replay-safe webhooks, signature rejection, lifecycle simulation, pagination, SSE, the watchdog, and path-traversal refusal. State is isolated via `RECOURSE_STATE_DIR`, so tests never touch demo history.
+Unit suites cover the fulfillment resolver (precedence, conflicts, gaps, validation, nothing-invented), the cross-check engine (every check plus its boundaries) and the AI client. The end-to-end suite starts the server with `PAYPAL_TEST_MODE=true` and `PAYPAL_API_BASE` pointed at a local stub, then asserts on the exact PayPal calls made. It covers: the approval gate (no approval → no PayPal call), the per-reason evidence rules, the requested-evidence rule, the HATEOAS action gate, the 2,000-character limit, a real submission reaching PayPal exactly once with the right evidence shape, replay-safe webhooks, signature rejection, lifecycle simulation, pagination, SSE, the watchdog, and path-traversal refusal. State is isolated via `RECOURSE_STATE_DIR`, so tests never touch demo history.
 
 The sandbox host guard stays strict in production; `PAYPAL_TEST_MODE` is the only thing that relaxes it.
 

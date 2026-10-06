@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -596,5 +596,78 @@ test('the delivery attempt log records what PayPal sent, including rejections', 
     if (row.outcome === 'accepted' || row.outcome === 'duplicate') {
       assert.equal(row.verified, true, `${row.outcome} should be recorded as signed`);
     }
+  }
+});
+
+test('a restart resumes an event that was recorded but never processed', async () => {
+  // Mirrors a crash — or a platform spinning an idle instance down — between
+  // "store the event" and "finish triaging it". Deterministic: the pending row
+  // is seeded, so nothing has to be killed mid-flight.
+  const dir = mkdtempSync(path.join(tmpdir(), 'recourse-resume-'));
+  const payload = {
+    id: 'EVT-RESUME-1',
+    event_type: 'CUSTOMER.DISPUTE.CREATED',
+    create_time: new Date().toISOString(),
+    resource: { dispute_id: 'PP-T-1' },
+  };
+  writeFileSync(path.join(dir, 'events.json'), JSON.stringify([{
+    id: payload.id,
+    eventType: payload.event_type,
+    label: 'Dispute created',
+    disputeId: 'PP-T-1',
+    receivedAt: new Date().toISOString(),
+    simulated: true,
+    verified: false,
+    processed: false,
+    triaged: false,
+    error: null,
+    payload,
+  }]));
+  writeFileSync(path.join(dir, 'packets.json'), '[]');
+
+  const port = await freePort();
+  const child = spawn(process.execPath, ['server.mjs'], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      PAYPAL_MODE: 'sandbox',
+      PAYPAL_TEST_MODE: 'true',
+      PAYPAL_API_BASE: stubBase,
+      PAYPAL_CLIENT_ID: 'resume-client',
+      PAYPAL_CLIENT_SECRET: 'resume-secret',
+      AI_ENABLED: 'false',
+      RECOURSE_STATE_DIR: dir,
+      CACHE_TTL_MS: '0',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const resumeBase = `http://127.0.0.1:${port}`;
+
+  try {
+    const bootDeadline = Date.now() + 15_000;
+    while (Date.now() < bootDeadline) {
+      try {
+        const response = await fetch(`${resumeBase}/api/config`);
+        if (response.ok) break;
+      } catch { /* not up yet */ }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+
+    let packet = null;
+    const packetDeadline = Date.now() + 10_000;
+    while (Date.now() < packetDeadline && !packet) {
+      const data = await fetch(`${resumeBase}/api/packets`).then((r) => r.json()).catch(() => ({ packets: [] }));
+      packet = (data.packets || []).find((item) => item.disputeId === 'PP-T-1');
+      if (!packet) await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    assert.ok(packet, 'a stranded event must be triaged after restart, not left pending forever');
+    assert.equal(packet.partial, undefined, 'the resume should reach PayPal, not fall back to the event payload');
+    assert.ok(packet.draft.length > 0, 'the packet should carry a real draft');
+  } finally {
+    child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -9,6 +9,7 @@ import {
   deterministicDraft,
   evidencePlan,
   fmtDate,
+  crossCheck,
   findAction,
   hasAction,
   moneyLabel,
@@ -228,4 +229,104 @@ test('normalizeRel folds case, underscores and whitespace', () => {
   assert.equal(normalizeRel('Provide_Evidence'), 'provide-evidence');
   assert.equal(normalizeRel('provide evidence'), 'provide-evidence');
   assert.equal(normalizeRel(''), '');
+});
+
+/* ------------------------------------------------------- cross-check */
+
+const NOT_RECEIVED = { reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED', create_time: '2026-10-06T00:00:00Z', dispute_amount: { currency_code: 'MYR', value: '200.00' } };
+const CAPTURE = { amount: { currency_code: 'MYR', value: '200.00' }, seller_protection: { status: 'ELIGIBLE', dispute_categories: ['ITEM_NOT_RECEIVED'] } };
+
+test('a partial dispute is a review item, not an error', () => {
+  // Buyers may legitimately dispute part of a payment, so this must not be
+  // reported as a mismatch with the same weight as contradictory records.
+  const findings = crossCheck({
+    dispute: NOT_RECEIVED,
+    capture: { amount: { currency_code: 'MYR', value: '1258.00' } },
+  });
+  const finding = findings.risks.find((risk) => risk.code === 'PARTIAL_DISPUTE');
+  assert.ok(finding, 'expected a partial-dispute finding');
+  assert.equal(finding.severity, 'review');
+  assert.deepEqual(finding.source_ids, ['paypal-dispute', 'paypal-transaction']);
+});
+
+test('a genuinely different amount is reported as a mismatch', () => {
+  const findings = crossCheck({
+    dispute: { ...NOT_RECEIVED, dispute_amount: { currency_code: 'USD', value: '200.00' } },
+    capture: CAPTURE,
+  });
+  assert.ok(findings.risks.some((risk) => risk.code === 'AMOUNT_MISMATCH'));
+});
+
+test('no amount check fires when either side is unknown', () => {
+  assert.equal(crossCheck({ dispute: NOT_RECEIVED }).risks.some((r) => /AMOUNT|PARTIAL/.test(r.code)), false);
+  assert.equal(crossCheck({ dispute: NOT_RECEIVED, capture: {} }).risks.length, 0);
+});
+
+test('delivery dated before shipment is flagged as contradictory records', () => {
+  const findings = crossCheck({
+    dispute: NOT_RECEIVED,
+    fulfillment: { fulfillment: { shipped_at: '2026-10-05T00:00:00Z', delivered_at: '2026-10-01T00:00:00Z', tracking_number: 'T1', carrier: 'USPS' } },
+  });
+  const finding = findings.risks.find((risk) => risk.code === 'DELIVERY_BEFORE_SHIPMENT');
+  assert.ok(finding);
+  assert.equal(finding.severity, 'high');
+  assert.deepEqual(finding.source_ids, ['fulfillment']);
+});
+
+test('delivery after the dispute opened weakens the position', () => {
+  const findings = crossCheck({
+    dispute: NOT_RECEIVED,
+    fulfillment: { fulfillment: { shipped_at: '2026-10-06T00:00:00Z', delivered_at: '2026-10-09T00:00:00Z', carrier: 'USPS', tracking_number: 'T1' } },
+  });
+  assert.ok(findings.risks.some((risk) => risk.code === 'DELIVERY_AFTER_DISPUTE'));
+});
+
+test('a non-receipt claim against a delivery before the dispute is a support, not a risk', () => {
+  const findings = crossCheck({
+    dispute: NOT_RECEIVED,
+    fulfillment: { fulfillment: { delivered_at: '2026-10-04T15:30:00Z', delivery_status: 'Delivered', carrier: 'DHL', tracking_number: 'X1' } },
+  });
+  const support = findings.supports.find((item) => item.code === 'CLAIM_VS_DELIVERED');
+  assert.ok(support, 'the central fact of the response must be surfaced');
+  assert.equal(findings.risks.some((risk) => risk.code === 'CLAIM_VS_DELIVERED'), false);
+});
+
+test('seller protection eligibility is surfaced when PayPal grants it', () => {
+  const findings = crossCheck({ dispute: NOT_RECEIVED, capture: CAPTURE });
+  assert.ok(findings.supports.some((support) => support.code === 'SELLER_PROTECTION_ELIGIBLE'));
+});
+
+test('an order matched to a different transaction is flagged', () => {
+  const findings = crossCheck({
+    dispute: { ...NOT_RECEIVED, disputed_transactions: [{ seller_transaction_id: 'TXN-A' }] },
+    order: { paypal_transaction_id: 'TXN-B' },
+  });
+  assert.ok(findings.risks.some((risk) => risk.code === 'TRANSACTION_MISMATCH'));
+});
+
+test('provider disagreement becomes a finding', () => {
+  const findings = crossCheck({
+    dispute: NOT_RECEIVED,
+    fulfillment: { fulfillment: { carrier: 'FedEx' }, conflicts: [{ field: 'tracking_number', values: [{ value: 'AAA', source: 'manual' }, { value: 'BBB', source: 'paypal-tracker' }] }] },
+  });
+  assert.ok(findings.risks.some((risk) => risk.code === 'FULFILLMENT_CONFLICT'));
+});
+
+test('gaps are reported for what is unknown, and are never treated as risks', () => {
+  const findings = crossCheck({ dispute: NOT_RECEIVED, fulfillment: { fulfillment: {}, gaps: [{ code: 'NO_TRACKING', detail: 'nothing known' }] } });
+  assert.ok(findings.gaps.some((gap) => gap.code === 'NO_TRACKING'));
+  assert.equal(findings.risks.length, 0, 'a missing record must not be reported as a conflict');
+});
+
+test('no finding is ever emitted without citing a source', () => {
+  const findings = crossCheck({
+    dispute: { ...NOT_RECEIVED, disputed_transactions: [{ seller_transaction_id: 'TXN-A' }] },
+    order: { paypal_transaction_id: 'TXN-B' },
+    fulfillment: { fulfillment: { shipped_at: '2026-10-05T00:00:00Z', delivered_at: '2026-10-01T00:00:00Z' }, conflicts: [{ field: 'carrier', values: [{ value: 'A', source: 'manual' }, { value: 'B', source: 'paypal-tracker' }] }] },
+    capture: { amount: { currency_code: 'MYR', value: '999.00' }, seller_protection: { status: 'ELIGIBLE' } },
+  });
+  for (const finding of [...findings.risks, ...findings.supports]) {
+    assert.ok(finding.source_ids.length > 0, `${finding.code} must cite at least one source`);
+    assert.ok(typeof finding.detail === 'string' && finding.detail.length > 0, `${finding.code} needs an explanation`);
+  }
 });

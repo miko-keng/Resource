@@ -27,7 +27,9 @@ function normalizeRel(rel = '') { return String(rel).trim().toLowerCase().replac
 function hasAction(links = [], action) { const wanted = normalizeRel(action); return (links || []).some(link => normalizeRel(link.rel) === wanted); }
 function evidenceIcon(title = '') { return /carrier|tracking|delivery/i.test(title) ? '↗' : '✉'; }
 function originTag(origin = 'local') {
-  const label = { paypal: 'PAYPAL', local: 'LOCAL', buyer: 'BUYER' }[origin] || 'LOCAL';
+  // 'manual' is a merchant assertion made in Recourse, distinct from their
+  // order system and from anything PayPal returned.
+  const label = { paypal: 'PAYPAL', local: 'MERCHANT', buyer: 'BUYER', manual: 'MANUAL' }[origin] || 'MERCHANT';
   return `<span class="origin-tag origin-${escapeHtml(origin)}">${label}</span>`;
 }
 function renderAnalysisStatus(result) {
@@ -61,15 +63,29 @@ function renderAnalysisStatus(result) {
       note.className = 'grounding-note unverified';
     }
   }
-  const contradictions = result.contradictions || [];
-  const box = $('#contradiction-note');
-  if (box) {
-    if (!contradictions.length) {
-      box.classList.add('hidden');
-    } else {
-      box.classList.remove('hidden');
-      $('#contradiction-text').textContent = contradictions
-        .map(code => CONTRADICTION_TEXT[code] || code.replaceAll('_', ' '))
+  // Findings carry a direction: risks weaken the position, supports defend it.
+  const findings = result.findings || null;
+  const risks = findings?.risks || [];
+  const supports = findings?.supports || [];
+
+  const riskBox = $('#contradiction-note');
+  if (riskBox) {
+    if (!risks.length) riskBox.classList.add('hidden');
+    else {
+      riskBox.classList.remove('hidden');
+      $('#contradiction-text').textContent = risks
+        .map(risk => risk.detail || CONTRADICTION_TEXT[risk.code] || risk.code.replaceAll('_', ' '))
+        .join(' ');
+    }
+  }
+
+  const supportBox = $('#support-note');
+  if (supportBox) {
+    if (!supports.length) supportBox.classList.add('hidden');
+    else {
+      supportBox.classList.remove('hidden');
+      $('#support-text').textContent = supports
+        .map(support => support.detail || support.code.replaceAll('_', ' '))
         .join(' ');
     }
   }
