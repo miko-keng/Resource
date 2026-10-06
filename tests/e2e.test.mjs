@@ -715,3 +715,43 @@ test('the agent still produces a complete packet when the planner stops immediat
   assert.ok(packet.findings && Array.isArray(packet.findings.risks));
   assert.equal(packet.grounding.status !== 'review', true, 'and a grounded draft');
 });
+
+/* --------------------------------------------- orders + evidence views */
+
+test('orders reports fulfilment resolved for a case, not only the merchant fixture file', async () => {
+  const { status, data } = await api('/api/orders');
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(data.orders));
+  assert.ok(Array.isArray(data.resolved), 'resolved fulfilment must be returned');
+
+  const entry = data.resolved.find((item) => item.disputeId === 'PP-T-1');
+  assert.ok(entry, 'a case with resolved fulfilment must appear');
+  assert.equal(entry.reasonLabel, 'Item not received');
+  assert.ok(entry.amount, 'the case amount must be carried so the row is identifiable without a merchant order');
+  assert.ok(entry.fulfillment, 'and the resolution detail');
+});
+
+test('evidence is grouped by case, with per-case records and totals', async () => {
+  const { status, data } = await api('/api/evidence');
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(data.cases));
+
+  const entry = data.cases.find((item) => item.disputeId === 'PP-T-1');
+  assert.ok(entry, 'each case must be represented');
+  assert.ok(entry.evidence.length > 0, 'and carry its own evidence');
+  assert.ok(entry.evidence.every((item) => item.origin), 'every record keeps its origin tag');
+  assert.equal(entry.reasonLabel, 'Item not received');
+
+  const counted = data.cases.reduce((total, item) => total + item.evidence.length, 0);
+  assert.equal(data.totals.records, counted, 'totals must agree with the grouped records');
+  assert.equal(data.caseCount, data.cases.length);
+});
+
+test('the two list views share one cached case scan instead of re-resolving', async () => {
+  const started = Date.now();
+  await api('/api/orders');
+  await api('/api/evidence');
+  const elapsed = Date.now() - started;
+  // Cold resolution is ~13s against the real sandbox; a warm scan must not be.
+  assert.ok(elapsed < 5000, `cached reads should be fast, took ${elapsed}ms`);
+});

@@ -233,10 +233,17 @@ function renderOrders() {
   const resolvedRows = resolved.map(entry => {
     const order = entry.order || {};
     const origin = order.fulfillment_origin || 'local';
-    const title = order.order_id
-      ? `${order.item || 'Order'} · ${order.order_id}`
-      : `Resolved fulfilment · ${entry.disputeId}`;
-    const meta = [`Case ${entry.disputeId}`, fulfillmentLine(entry.fulfillment)];
+    const amount = entry.amount ? `${entry.amount.currency_code || ''} ${entry.amount.value || ''}`.trim() : '';
+    // With no merchant order there is no item or order id, so lead with what the
+    // case actually is rather than an uninformative "resolved fulfilment" stub.
+    const title = order.item
+      ? `${order.item}${order.order_id ? ` · ${order.order_id}` : ''}`
+      : `${entry.reasonLabel || 'Dispute'}${amount ? ` · ${amount}` : ''}`;
+    const meta = [
+      `Case ${entry.disputeId}`,
+      order.order_id ? null : (amount || null),
+      fulfillmentLine(entry.fulfillment),
+    ].filter(Boolean);
     return `<div class="workspace-row"><span class="case-symbol shipping">↗</span>${originTag(origin)}<div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(meta.join(' · '))}</small></div><button class="quiet-button open-case" data-case="${escapeHtml(entry.disputeId)}">Open case</button></div>`;
   }).join('');
 
@@ -257,22 +264,49 @@ function renderOrders() {
   wire();
 }
 function renderEvidenceLibrary() {
-  const all = state.evidence || [];
-  const counts = state.evidenceByOrigin || {};
-  const summary = Object.entries(counts).map(([origin, n]) => `${n} ${origin}`).join(' · ');
-  $('#evidence-library-count').textContent = all.length
-    ? `${all.length} evidence record${all.length === 1 ? '' : 's'} across ${state.caseCount || 0} case${state.caseCount === 1 ? '' : 's'}${summary ? ` (${summary})` : ''}`
+  const cases = state.evidenceCases || [];
+  const totals = state.evidenceTotals || {};
+  const byOrigin = totals.byOrigin || {};
+  const summary = Object.entries(byOrigin).map(([origin, n]) => `${n} ${origin}`).join(' · ');
+
+  $('#evidence-library-count').textContent = totals.records
+    ? `${totals.records} record${totals.records === 1 ? '' : 's'} across ${cases.length} case${cases.length === 1 ? '' : 's'}${summary ? ` (${summary})` : ''}`
     : 'No evidence recorded yet';
-  $('#evidence-library-list').innerHTML = all.length
-    ? all.map(item => `<div class="workspace-row"><span class="evidence-icon">${/carrier|tracking|delivery/i.test(item.title || '') ? '↗' : '✉'}</span>${originTag(item.origin)}<div><strong>${escapeHtml(item.title || 'Evidence')}</strong><small>${escapeHtml(item.source || '')} · case ${escapeHtml(item.disputeId || '')} · ${date(item.at, { month: 'short', day: 'numeric' })}</small></div></div>`).join('')
-    : '<p class="empty-evidence">Nothing has been assembled yet. Open a case and run the analysis.</p>';
+
+  if (!cases.length) {
+    $('#evidence-library-list').innerHTML = '<p class="empty-evidence">Nothing has been assembled yet. Open a case, or send a simulated dispute event.</p>';
+    return;
+  }
+
+  $('#evidence-library-list').innerHTML = cases.map(entry => {
+    const amount = entry.amount ? `${entry.amount.currency_code || ''} ${entry.amount.value || ''}`.trim() : '';
+    const meta = [
+      `Case ${entry.disputeId}`,
+      amount,
+      entry.matched_local_order ? 'merchant order matched' : 'no merchant order',
+      `${entry.evidence.length} record${entry.evidence.length === 1 ? '' : 's'}`,
+    ].filter(Boolean).join(' · ');
+
+    const header = `<div class="evidence-case-head"><div><strong>${escapeHtml(entry.reasonLabel || entry.reason || 'Dispute')}</strong><small>${escapeHtml(meta)}</small>${entry.error ? `<p class="event-error">${escapeHtml(entry.error)}</p>` : ''}</div><button class="quiet-button open-case" data-case="${escapeHtml(entry.disputeId)}">Open case</button></div>`;
+
+    const rows = entry.evidence.length
+      ? entry.evidence.map(item => `<div class="workspace-row evidence-under-case"><span class="evidence-icon">${/carrier|tracking|delivery/i.test(item.title || '') ? '↗' : '✉'}</span>${originTag(item.origin)}<div><strong>${escapeHtml(item.title || 'Evidence')}</strong><small>${escapeHtml(item.source || '')} · ${date(item.at, { month: 'short', day: 'numeric' })}</small></div></div>`).join('')
+      : '<p class="empty-evidence">No evidence could be assembled for this case.</p>';
+
+    return `<section class="evidence-case">${header}${rows}</section>`;
+  }).join('');
+
+  document.querySelectorAll('#evidence-library-list .open-case').forEach(button => button.addEventListener('click', () => {
+    setPage('disputes');
+    loadCase(button.dataset.case);
+  }));
 }
+
 async function loadEvidence() {
   try {
     const result = await api('/api/evidence');
-    state.evidence = result.evidence || [];
-    state.evidenceByOrigin = result.byOrigin || {};
-    state.caseCount = result.cases || 0;
+    state.evidenceCases = result.cases || [];
+    state.evidenceTotals = result.totals || {};
     renderEvidenceLibrary();
   } catch (error) { showToast(error.message, true); }
 }

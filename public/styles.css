@@ -50,3 +50,11 @@
 /* --- orders grouping labels (added) --- */
 .list-label{margin:10px 0 4px;font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
 .list-label:first-child{margin-top:0}
+
+/* --- evidence grouped by case (added) --- */
+.evidence-case{margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.evidence-case:last-child{border-bottom:0;padding-bottom:0;margin-bottom:0}
+.evidence-case-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:6px}
+.evidence-case-head strong{font-size:9px;color:var(--ink)}
+.evidence-case-head small{display:block;font-size:7px;color:var(--muted);margin-top:2px}
+.evidence-under-case{padding-left:10px;border-left:2px solid var(--line)}

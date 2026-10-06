@@ -213,7 +213,10 @@ async function paypal(pathname, options = {}) {
   return data;
 }
 
-function invalidateDispute(id) { detailCache.delete(id); }
+function invalidateDispute(id) {
+  detailCache.delete(id);
+  invalidateCaseScan();
+}
 
 async function fetchDisputeFresh(id) {
   const dispute = await paypal(`/v1/customer/disputes/${encodeURIComponent(id)}`);
@@ -321,8 +324,13 @@ function normalizeTransaction(source, pathUsed) {
   };
 }
 
+const txnResultCache = new Map();
+
 async function fetchPayPalTransaction(transactionId) {
   if (!transactionId || MODE !== 'sandbox') return null;
+  const resultKey = `txnresult:${transactionId}`;
+  const cachedResult = txnResultCache.get(resultKey);
+  if (cachedResult && cachedResult.expiresAt > Date.now()) return cachedResult.value;
   const candidates = [
     { path: `/v1/reporting/transactions?transaction_id=${encodeURIComponent(transactionId)}&fields=all`, pick: (data) => data.transaction_details?.[0] },
     { path: `/v2/payments/captures/${encodeURIComponent(transactionId)}`, pick: (data) => data },
@@ -339,9 +347,15 @@ async function fetchPayPalTransaction(transactionId) {
         detailCache.set(key, { value: data, expiresAt: Date.now() + 60_000 });
       }
       const picked = candidate.pick(data);
-      if (picked) return normalizeTransaction(picked, candidate.path.split('?')[0]);
+      if (picked) {
+        const resolved = normalizeTransaction(picked, candidate.path.split('?')[0]);
+        txnResultCache.set(resultKey, { value: resolved, expiresAt: Date.now() + 60_000 });
+        return resolved;
+      }
     } catch { /* try the next representation */ }
   }
+  // Remember the miss too, or every caller pays for the failed lookups again.
+  txnResultCache.set(resultKey, { value: null, expiresAt: Date.now() + 60_000 });
   return null;
 }
 
@@ -721,6 +735,49 @@ async function triageCase(disputeId, { trigger = 'manual', broadcast = true } = 
   if (broadcast) sseBroadcast('triage', { disputeId: dispute.id, trigger, deadline, evidenceCount: evidence.length, at: packet.preparedAt });
   return packet;
 }
+
+const caseScanCache = new Map();
+
+/**
+ * Resolve every case once and memoise it briefly.
+ *
+ * /api/orders and /api/evidence each used to re-run the whole PayPal
+ * resolution — list, per-case detail, the transaction fallback chain and the
+ * tracker — so the two together made roughly twenty round trips and the Orders
+ * page took 15 seconds to appear. One shared, short-lived scan fixes that.
+ *
+ * Each case is isolated: one failure yields a degraded row, never a failed scan.
+ */
+async function resolveAllCases() {
+  const key = `scan:${MODE}`;
+  const hit = caseScanCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.value;
+
+  const disputes = MODE === 'sandbox' ? (await listSandboxCases()).cases : await listFixtureCases();
+  const resolved = await mapLimit(disputes, 3, async (dispute) => {
+    const base = {
+      disputeId: dispute.id,
+      reason: dispute.reason,
+      reasonLabel: reasonLabel(dispute.reason),
+      amount: dispute.dispute_amount || null,
+      status: dispute.status || null,
+      stage: dispute.dispute_life_cycle_stage || null,
+      due: dispute.seller_response_due_date || null,
+    };
+    try {
+      const matched = await matchingOrder(dispute);
+      const { evidence, fulfillment, order, plan, paypalTransaction, deadline } = await assembleCase(dispute, matched);
+      return { ...base, matched_local_order: Boolean(matched), order, fulfillment, plan, deadline, evidence, transaction: paypalTransaction };
+    } catch (error) {
+      return { ...base, matched_local_order: false, order: null, fulfillment: null, plan: null, deadline: deadlineInfo(dispute.seller_response_due_date), evidence: [], error: error.message || 'resolution failed' };
+    }
+  });
+
+  const value = { resolved, at: new Date().toISOString() };
+  caseScanCache.set(key, { value, expiresAt: Date.now() + 30_000 });
+  return value;
+}
+function invalidateCaseScan() { caseScanCache.clear(); }
 
 async function getPacket(disputeId) {
   return (await packets()).find((row) => row.disputeId === disputeId) || null;
@@ -1232,37 +1289,28 @@ const server = http.createServer(async (req, res) => {
       // A case may have resolved fulfilment with no matching merchant order —
       // a manual entry, or tracking read from PayPal. Those are real records and
       // must appear here, or the Orders view silently omits the newest data.
-      const disputes = MODE === 'sandbox' ? (await listSandboxCases()).cases : await listFixtureCases();
-      const resolved = await mapLimit(disputes, 3, async (dispute) => {
-        const matched = await matchingOrder(dispute);
-        const { fulfillment, order } = await assembleCase(dispute, matched);
-        if (!order) return null;
-        return {
-          disputeId: dispute.id,
-          reason: dispute.reason,
-          status: dispute.status || null,
-          due: dispute.seller_response_due_date || null,
-          amount: dispute.dispute_amount || null,
-          matched_local_order: Boolean(matched),
-          order,
-          fulfillment,
-        };
-      });
-      return send(res, 200, { orders: enriched, resolved: resolved.filter(Boolean) });
+      const { resolved } = await resolveAllCases();
+      return send(res, 200, { orders: enriched, resolved: resolved.filter((entry) => entry.order) });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/evidence') {
-      // One cross-case evidence view instead of the browser re-deriving a
-      // fixture-shaped copy of it.
-      const disputes = MODE === 'sandbox' ? (await listSandboxCases()).cases : await listFixtureCases();
-      const perCase = await mapLimit(disputes, 3, async (dispute) => {
-        const matched = await matchingOrder(dispute);
-        const { evidence } = await assembleCase(dispute, matched);
-        return evidence.map((item) => ({ ...item, disputeId: dispute.id, reason: dispute.reason }));
-      });
-      const evidence = perCase.flat();
-      const byOrigin = evidence.reduce((acc, item) => { acc[item.origin] = (acc[item.origin] || 0) + 1; return acc; }, {});
-      return send(res, 200, { evidence, byOrigin, cases: disputes.length });
+      // Grouped by case, so the library reads as "this case, this evidence"
+      // rather than an undifferentiated pile from every dispute.
+      const { resolved } = await resolveAllCases();
+      const cases = resolved.map((entry) => ({
+        disputeId: entry.disputeId,
+        reason: entry.reason,
+        reasonLabel: entry.reasonLabel,
+        amount: entry.amount,
+        status: entry.status,
+        due: entry.due,
+        matched_local_order: entry.matched_local_order,
+        error: entry.error || null,
+        evidence: entry.evidence || [],
+      }));
+      const all = cases.flatMap((entry) => entry.evidence);
+      const byOrigin = all.reduce((acc, item) => { acc[item.origin] = (acc[item.origin] || 0) + 1; return acc; }, {});
+      return send(res, 200, { cases, totals: { records: all.length, byOrigin }, caseCount: cases.length });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/events') {
@@ -1464,4 +1512,10 @@ server.listen(PORT, HOST, () => {
   resumePendingEvents()
     .then((count) => { if (count) console.log(`[recourse] resumed ${count} interrupted event(s)`); })
     .catch((error) => console.error('[recourse] resume failed:', error.message));
+
+  // Warm the case scan so the first page load is not a 13-second cold start.
+  const startedAt = Date.now();
+  resolveAllCases()
+    .then(({ resolved }) => console.log(`[recourse] case scan warmed: ${resolved.length} case(s) in ${Date.now() - startedAt}ms`))
+    .catch((error) => console.error('[recourse] case scan warm-up failed:', error.message));
 });
