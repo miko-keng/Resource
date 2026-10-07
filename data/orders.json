@@ -1,12 +1,12 @@
 [
   {
     "invoice_number": "RC-10482",
-    "paypal_transaction_id": "4B653331N90046216",
+    "paypal_transaction_id": "8MC40271AB815204X",
     "order_id": "ORD-10482",
-    "customer": "John Doe",
+    "customer": "Jordan Lee",
     "item": "Everyday Carry Backpack",
-    "amount": "10.00",
-    "currency": "MYR",
+    "amount": "84.00",
+    "currency": "USD",
     "ordered_at": "2026-09-18T10:14:00Z",
     "fulfillment": {
       "carrier": "USPS",

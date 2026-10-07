@@ -123,7 +123,8 @@ async function rawBody(req) {
 }
 async function body(req) {
   const raw = await rawBody(req);
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { throw Object.assign(new Error('Invalid JSON in request body.'), { status: 400 }); }
 }
 
 /* ------------------------------------------------------------------ SSE */
@@ -182,7 +183,10 @@ function sseBroadcast(type, data) {
 
 /* --------------------------------------------------------------- PayPal */
 
+let _tokenCache = { token: null, expiresAt: 0 };
+
 async function accessToken() {
+  if (_tokenCache.token && Date.now() < _tokenCache.expiresAt) return _tokenCache.token;
   if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
     throw Object.assign(new Error('PayPal credentials are not configured. Add them to your local .env file.'), { status: 503 });
   }
@@ -194,6 +198,8 @@ async function accessToken() {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error('PayPal OAuth request failed.'), { status: response.status, paypal: data });
+  const expiresIn = (data.expires_in || 3600) - 60;
+  _tokenCache = { token: data.access_token, expiresAt: Date.now() + expiresIn * 1000 };
   return data.access_token;
 }
 

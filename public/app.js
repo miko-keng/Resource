@@ -1,3 +1,21 @@
+// Copyright (c) 2012-2026 Grabtaxi Holdings PTE LTD (GRAB), All Rights Reserved. NOTICE: All information contained herein
+// is, and remains the property of GRAB. The intellectual and technical concepts contained herein are confidential, proprietary
+// and controlled by GRAB and may be covered by patents, patents in process, and are protected by trade secret or copyright law.
+//
+// You are strictly forbidden to copy, download, store (in any medium), transmit, disseminate, adapt or change this material
+// in any way unless prior written permission is obtained from GRAB. Access to the source code contained herein is hereby
+// forbidden to anyone except current GRAB employees or contractors with binding Confidentiality and Non-disclosure agreements
+// explicitly covering such access.
+//
+// The copyright notice above does not evidence any actual or intended publication or disclosure of this source code,
+// which includes information that is confidential and/or proprietary, and is a trade secret, of GRAB.
+//
+// ANY REPRODUCTION, MODIFICATION, DISTRIBUTION, PUBLIC PERFORMANCE, OR PUBLIC DISPLAY OF OR THROUGH USE OF THIS SOURCE
+// CODE WITHOUT THE EXPRESS WRITTEN CONSENT OF GRAB IS STRICTLY PROHIBITED, AND IN VIOLATION OF APPLICABLE LAWS AND
+// INTERNATIONAL TREATIES. THE RECEIPT OR POSSESSION OF THIS SOURCE CODE AND/OR RELATED INFORMATION DOES NOT CONVEY
+// OR IMPLY ANY RIGHTS TO REPRODUCE, DISCLOSE OR DISTRIBUTE ITS CONTENTS, OR TO MANUFACTURE, USE, OR SELL ANYTHING
+// THAT IT MAY DESCRIBE, IN WHOLE OR IN PART.
+
 const $ = (selector) => document.querySelector(selector);
 const state = { config: { mode: 'fixture', aiConfigured: false }, activeId: null, caseData: null, analysis: null, busy: false, cases: [], orders: [], caseFilter: 'all', showAllActivity: false };
 
@@ -16,7 +34,9 @@ function date(value, options = { month: 'short', day: 'numeric', year: 'numeric'
 function relative(value) {
   if (!value) return 'Date not provided';
   const elapsed = Date.now() - new Date(value).getTime();
-  const hours = Math.max(1, Math.round(elapsed / 3600000));
+  const minutes = Math.round(elapsed / 60000);
+  if (minutes < 60) return `${Math.max(1, minutes)}m ago`;
+  const hours = Math.round(elapsed / 3600000);
   return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 function reasonName(reason = '') { return ({ MERCHANDISE_OR_SERVICE_NOT_RECEIVED: 'Item not received', MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED: 'Significantly not as described', CREDIT_NOT_PROCESSED: 'Credit not processed', UNAUTHORISED: 'Unauthorized transaction' })[reason] || reason.replaceAll('_', ' ').toLowerCase().replace(/^./, x => x.toUpperCase()); }
@@ -91,11 +111,11 @@ function renderAnalysisStatus(result) {
   }
 }
 const CONTRADICTION_TEXT = {
-  delivery_before_shipment: 'The recorded delivery date precedes the shipment date.',
-  delivery_status_conflict: 'The carrier status conflicts with another fulfilment record.',
-  missing_address: 'The delivery address is missing from the available records.',
-  missing_recipient: 'The recipient identity or signature is missing from the available records.',
-  missing_refund: 'No refund transaction id is linked to the order.',
+  DELIVERY_BEFORE_SHIPMENT: 'The recorded delivery date precedes the shipment date.',
+  DELIVERY_STATUS_CONFLICT: 'The carrier status conflicts with another fulfilment record.',
+  MISSING_ADDRESS: 'The delivery address is missing from the available records.',
+  MISSING_RECIPIENT: 'The recipient identity or signature is missing from the available records.',
+  MISSING_REFUND: 'No refund transaction id is linked to the order.',
 };
 
 async function loadCase(id = state.activeId, shouldAnalyze = true) {
@@ -213,7 +233,7 @@ function renderOverview() {
   $('#overview-case-note').textContent = `${cases.length} live PayPal dispute${cases.length === 1 ? '' : 's'} in this workspace`;
   $('#overview-case-list').innerHTML = cases.length ? cases.map(item => `<div class="workspace-row"><span class="case-symbol shipping">↗</span><div><strong>${escapeHtml(reasonName(item.reason))}</strong><small>${escapeHtml(item.buyer?.name || 'PayPal buyer')} · ${escapeHtml(money(item.dispute_amount))} · ${escapeHtml(item.id)}</small></div><button class="quiet-button open-case" data-case="${escapeHtml(item.id)}">Open workspace</button></div>`).join('') : '<p class="empty-evidence">No live PayPal disputes were returned.</p>';
   const order = state.caseData?.order;
-  const sourceCount = state.analysis?.evidence?.length || (order ? 1 + order.communications.length : 0);
+  const sourceCount = state.analysis?.evidence?.length || (order ? 1 + (order.communications || []).length : 0);
   $('#overview-readiness').innerHTML = `<div class="readiness-item"><strong>${sourceCount} linked source${sourceCount === 1 ? '' : 's'}</strong>${order ? `Order ${escapeHtml(order.order_id)} is matched to the selected case.` : 'No local order has been matched to the selected case.'}</div><div class="readiness-item"><strong>${state.config.aiConfigured ? 'AI drafting enabled' : 'AI drafting not configured'}</strong>${state.config.aiConfigured ? 'Drafts are checked for source citations before they are shown.' : 'The current draft uses deterministic local rules.'}</div>`;
   document.querySelectorAll('.open-case').forEach(button => button.addEventListener('click', () => { setPage('disputes'); loadCase(button.dataset.case); }));
 }
@@ -576,7 +596,6 @@ function renderAttempts(rows = []) {
       ? `${rows.length} delivery attempt${rows.length === 1 ? '' : 's'} seen, including rejected ones`
       : 'No delivery attempts seen yet. If PayPal reports a send, one should appear here.';
   }
-  const tone = { accepted: 'ok', duplicate: 'ok', 'accepted-fixture': 'warn', duplicate_warn: 'warn' };
   list.innerHTML = rows.length ? rows.map(row => {
     const bad = ['signature-rejected', 'not-configured', 'missing-headers', 'bad-json'].includes(row.outcome);
     return `<div class="workspace-row event-row"><span class="urgency-dot ${bad ? 'overdue' : 'ok'}"></span><div><strong>${escapeHtml(row.outcome)}</strong><small>${escapeHtml(row.eventType || 'unknown event')}${row.eventId ? ` · ${escapeHtml(row.eventId)}` : ''} · ${relative(row.at)}</small>${row.detail ? `<p class="event-error">${escapeHtml(row.detail)}</p>` : ''}</div></div>`;
